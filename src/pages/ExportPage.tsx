@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import {
   Aperture,
@@ -237,6 +237,60 @@ const timestampOrDash = (timestamp?: number): string => {
 
 const createTaskId = (): string => `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
+const WriteLayoutSelector = memo(function WriteLayoutSelector({
+  writeLayout,
+  onChange
+}: {
+  writeLayout: configService.ExportWriteLayout
+  onChange: (value: configService.ExportWriteLayout) => Promise<void>
+}) {
+  const [isOpen, setIsOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (containerRef.current?.contains(event.target as Node)) return
+      setIsOpen(false)
+    }
+
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [isOpen])
+
+  const writeLayoutLabel = writeLayoutOptions.find(option => option.value === writeLayout)?.label || 'A（类型分目录）'
+
+  return (
+    <div className="write-layout-control" ref={containerRef}>
+      <span className="control-label">写入目录方式</span>
+      <button
+        className={`layout-trigger ${isOpen ? 'active' : ''}`}
+        type="button"
+        onClick={() => setIsOpen(prev => !prev)}
+      >
+        {writeLayoutLabel}
+      </button>
+      <div className={`layout-dropdown ${isOpen ? 'open' : ''}`}>
+        {writeLayoutOptions.map(option => (
+          <button
+            key={option.value}
+            className={`layout-option ${writeLayout === option.value ? 'active' : ''}`}
+            type="button"
+            onClick={async () => {
+              await onChange(option.value)
+              setIsOpen(false)
+            }}
+          >
+            <span className="layout-option-label">{option.label}</span>
+            <span className="layout-option-desc">{option.desc}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+})
+
 function ExportPage() {
   const location = useLocation()
 
@@ -255,7 +309,6 @@ function ExportPage() {
 
   const [exportFolder, setExportFolder] = useState('')
   const [writeLayout, setWriteLayout] = useState<configService.ExportWriteLayout>('A')
-  const [showWriteLayoutSelect, setShowWriteLayoutSelect] = useState(false)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'excel',
@@ -302,7 +355,6 @@ function ExportPage() {
   const sessionLoadTokenRef = useRef(0)
   const loadingMetricsRef = useRef<Set<string>>(new Set())
   const preselectAppliedRef = useRef(false)
-  const writeLayoutControlRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     tasksRef.current = tasks
@@ -525,18 +577,6 @@ function ExportPage() {
   useEffect(() => {
     preselectAppliedRef.current = false
   }, [location.key, preselectSessionIds])
-
-  useEffect(() => {
-    if (!showWriteLayoutSelect) return
-
-    const handleOutsideClick = (event: MouseEvent) => {
-      if (writeLayoutControlRef.current?.contains(event.target as Node)) return
-      setShowWriteLayoutSelect(false)
-    }
-
-    document.addEventListener('mousedown', handleOutsideClick)
-    return () => document.removeEventListener('mousedown', handleOutsideClick)
-  }, [showWriteLayoutSelect])
 
   useEffect(() => {
     if (preselectAppliedRef.current) return
@@ -1306,7 +1346,6 @@ function ExportPage() {
     return count
   }, [visibleSessions, selectedSessions])
 
-  const writeLayoutLabel = writeLayoutOptions.find(option => option.value === writeLayout)?.label || 'A（类型分目录）'
   const tableColSpan = activeTab === 'group' ? 14 : (activeTab === 'private' || activeTab === 'former_friend' ? 11 : 10)
   const canCreateTask = exportDialog.scope === 'sns'
     ? Boolean(exportFolder)
@@ -1330,6 +1369,10 @@ function ExportPage() {
   const taskRunningCount = tasks.filter(task => task.status === 'running').length
   const taskQueuedCount = tasks.filter(task => task.status === 'queued').length
   const showInitialSkeleton = isLoading && sessions.length === 0
+  const tableBodyRows = useMemo(
+    () => visibleSessions.map(renderRow),
+    [visibleSessions, selectedSessions, sessionMetrics, activeTab, runningSessionIds, queuedSessionIds, nowTick, lastExportBySession]
+  )
 
   return (
     <div className="export-board-page">
@@ -1371,33 +1414,13 @@ function ExportPage() {
             </div>
           </div>
 
-          <div className="write-layout-control" ref={writeLayoutControlRef}>
-            <span className="control-label">写入目录方式</span>
-            <button
-              className={`layout-trigger ${showWriteLayoutSelect ? 'active' : ''}`}
-              type="button"
-              onClick={() => setShowWriteLayoutSelect(prev => !prev)}
-            >
-              {writeLayoutLabel}
-            </button>
-            <div className={`layout-dropdown ${showWriteLayoutSelect ? 'open' : ''}`}>
-              {writeLayoutOptions.map(option => (
-                <button
-                  key={option.value}
-                  className={`layout-option ${writeLayout === option.value ? 'active' : ''}`}
-                  type="button"
-                  onClick={async () => {
-                    setWriteLayout(option.value)
-                    setShowWriteLayoutSelect(false)
-                    await configService.setExportWriteLayout(option.value)
-                  }}
-                >
-                  <span className="layout-option-label">{option.label}</span>
-                  <span className="layout-option-desc">{option.desc}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <WriteLayoutSelector
+            writeLayout={writeLayout}
+            onChange={async (value) => {
+              setWriteLayout(value)
+              await configService.setExportWriteLayout(value)
+            }}
+          />
         </div>
       </div>
 
@@ -1585,7 +1608,7 @@ function ExportPage() {
                   </td>
                 </tr>
               ) : (
-                visibleSessions.map(renderRow)
+                tableBodyRows
               )}
             </tbody>
           </table>
