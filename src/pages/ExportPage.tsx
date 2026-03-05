@@ -38,6 +38,7 @@ import {
   onOpenSingleExport
 } from '../services/exportBridge'
 import { useContactTypeCountsStore } from '../stores/contactTypeCountsStore'
+import type { SnsPost } from '../types/sns'
 import './ExportPage.scss'
 
 type ConversationTab = 'private' | 'group' | 'official' | 'former_friend'
@@ -422,6 +423,20 @@ const formatYmdHmDateTime = (timestamp?: number): string => {
   return `${y}-${m}-${day} ${h}:${min}`
 }
 
+const isSingleContactSession = (sessionId: string): boolean => {
+  const normalized = String(sessionId || '').trim()
+  if (!normalized) return false
+  if (normalized.includes('@chatroom')) return false
+  if (normalized.startsWith('gh_')) return false
+  return true
+}
+
+const isSnsVideoMediaUrl = (url?: string): boolean => {
+  if (!url) return false
+  const lower = url.toLowerCase()
+  return (lower.includes('snsvideodownload') || lower.includes('.mp4') || lower.includes('video')) && !lower.includes('vweixinthumb')
+}
+
 const formatPathBrief = (value: string, maxLength = 52): string => {
   const normalized = String(value || '')
   if (normalized.length <= maxLength) return normalized
@@ -659,6 +674,12 @@ interface SessionDetail {
   firstMessageTime?: number
   latestMessageTime?: number
   messageTables: { dbName: string; tableName: string; count: number }[]
+}
+
+interface SessionSnsTimelineTarget {
+  username: string
+  displayName: string
+  avatarUrl?: string
 }
 
 interface SessionExportMetric {
@@ -1302,6 +1323,15 @@ function ExportPage() {
   const [isRefreshingSessionDetailStats, setIsRefreshingSessionDetailStats] = useState(false)
   const [isLoadingSessionRelationStats, setIsLoadingSessionRelationStats] = useState(false)
   const [copiedDetailField, setCopiedDetailField] = useState<string | null>(null)
+  const [snsUserPostCounts, setSnsUserPostCounts] = useState<Record<string, number>>({})
+  const [snsUserPostCountsStatus, setSnsUserPostCountsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  const [sessionSnsTimelineTarget, setSessionSnsTimelineTarget] = useState<SessionSnsTimelineTarget | null>(null)
+  const [sessionSnsTimelinePosts, setSessionSnsTimelinePosts] = useState<SnsPost[]>([])
+  const [sessionSnsTimelineLoading, setSessionSnsTimelineLoading] = useState(false)
+  const [sessionSnsTimelineLoadingMore, setSessionSnsTimelineLoadingMore] = useState(false)
+  const [sessionSnsTimelineHasMore, setSessionSnsTimelineHasMore] = useState(false)
+  const [sessionSnsTimelineTotalPosts, setSessionSnsTimelineTotalPosts] = useState<number | null>(null)
+  const [sessionSnsTimelineStatsLoading, setSessionSnsTimelineStatsLoading] = useState(false)
 
   const [exportFolder, setExportFolder] = useState('')
   const [writeLayout, setWriteLayout] = useState<configService.ExportWriteLayout>('B')
@@ -1391,6 +1421,9 @@ function ExportPage() {
   const isLoadingSessionCountsRef = useRef(false)
   const activeTabRef = useRef<ConversationTab>('private')
   const detailStatsPriorityRef = useRef(false)
+  const sessionSnsTimelinePostsRef = useRef<SnsPost[]>([])
+  const sessionSnsTimelineLoadingRef = useRef(false)
+  const sessionSnsTimelineRequestTokenRef = useRef(0)
   const sessionPreciseRefreshAtRef = useRef<Record<string, number>>({})
   const sessionLoadProgressSnapshotRef = useRef<Record<string, { loaded: number; total: number }>>({})
   const sessionMediaMetricQueueRef = useRef<string[]>([])
@@ -1774,6 +1807,10 @@ function ExportPage() {
     hasSeededSnsStatsRef.current = hasSeededSnsStats
   }, [hasSeededSnsStats])
 
+  useEffect(() => {
+    sessionSnsTimelinePostsRef.current = sessionSnsTimelinePosts
+  }, [sessionSnsTimelinePosts])
+
   const preselectSessionIds = useMemo(() => {
     const state = location.state as { preselectSessionIds?: unknown; preselectSessionId?: unknown } | null
     const rawList = Array.isArray(state?.preselectSessionIds)
@@ -1918,6 +1955,177 @@ function ExportPage() {
       }
     }
   }, [])
+
+  const loadSnsUserPostCounts = useCallback(async (options?: { force?: boolean }) => {
+    if (snsUserPostCountsStatus === 'loading') return
+    if (!options?.force && snsUserPostCountsStatus === 'ready') return
+
+    setSnsUserPostCountsStatus('loading')
+    try {
+      const result = await window.electronAPI.sns.getUserPostCounts()
+      if (result.success && result.counts) {
+        const normalized: Record<string, number> = {}
+        for (const [rawUsername, rawCount] of Object.entries(result.counts)) {
+          const username = String(rawUsername || '').trim()
+          if (!username) continue
+          const value = Number(rawCount)
+          normalized[username] = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+        }
+        setSnsUserPostCounts(normalized)
+        setSnsUserPostCountsStatus('ready')
+        return
+      }
+
+      setSnsUserPostCountsStatus('error')
+    } catch (error) {
+      console.error('加载朋友圈用户条数失败:', error)
+      setSnsUserPostCountsStatus('error')
+    }
+  }, [snsUserPostCountsStatus])
+
+  const loadSessionSnsTimelinePosts = useCallback(async (target: SessionSnsTimelineTarget, options?: { reset?: boolean }) => {
+    const reset = Boolean(options?.reset)
+    if (sessionSnsTimelineLoadingRef.current) return
+
+    sessionSnsTimelineLoadingRef.current = true
+    if (reset) {
+      setSessionSnsTimelineLoading(true)
+      setSessionSnsTimelineLoadingMore(false)
+      setSessionSnsTimelineHasMore(false)
+    } else {
+      setSessionSnsTimelineLoadingMore(true)
+    }
+
+    const requestToken = ++sessionSnsTimelineRequestTokenRef.current
+
+    try {
+      const limit = 20
+      let endTime: number | undefined
+      if (!reset && sessionSnsTimelinePostsRef.current.length > 0) {
+        endTime = sessionSnsTimelinePostsRef.current[sessionSnsTimelinePostsRef.current.length - 1].createTime - 1
+      }
+
+      const result = await window.electronAPI.sns.getTimeline(limit, 0, [target.username], '', undefined, endTime)
+      if (requestToken !== sessionSnsTimelineRequestTokenRef.current) return
+
+      if (!result.success || !Array.isArray(result.timeline)) {
+        if (reset) {
+          setSessionSnsTimelinePosts([])
+          setSessionSnsTimelineHasMore(false)
+        }
+        return
+      }
+
+      const timeline = [...(result.timeline as SnsPost[])].sort((a, b) => b.createTime - a.createTime)
+      if (reset) {
+        setSessionSnsTimelinePosts(timeline)
+        setSessionSnsTimelineHasMore(timeline.length >= limit)
+        return
+      }
+
+      const existingIds = new Set(sessionSnsTimelinePostsRef.current.map((post) => post.id))
+      const uniqueOlder = timeline.filter((post) => !existingIds.has(post.id))
+      if (uniqueOlder.length > 0) {
+        const merged = [...sessionSnsTimelinePostsRef.current, ...uniqueOlder].sort((a, b) => b.createTime - a.createTime)
+        setSessionSnsTimelinePosts(merged)
+      }
+      if (timeline.length < limit) {
+        setSessionSnsTimelineHasMore(false)
+      }
+    } catch (error) {
+      console.error('加载联系人朋友圈失败:', error)
+      if (requestToken === sessionSnsTimelineRequestTokenRef.current && reset) {
+        setSessionSnsTimelinePosts([])
+        setSessionSnsTimelineHasMore(false)
+      }
+    } finally {
+      if (requestToken === sessionSnsTimelineRequestTokenRef.current) {
+        sessionSnsTimelineLoadingRef.current = false
+        setSessionSnsTimelineLoading(false)
+        setSessionSnsTimelineLoadingMore(false)
+      }
+    }
+  }, [])
+
+  const closeSessionSnsTimeline = useCallback(() => {
+    sessionSnsTimelineRequestTokenRef.current += 1
+    sessionSnsTimelineLoadingRef.current = false
+    setSessionSnsTimelineTarget(null)
+    setSessionSnsTimelinePosts([])
+    setSessionSnsTimelineLoading(false)
+    setSessionSnsTimelineLoadingMore(false)
+    setSessionSnsTimelineHasMore(false)
+    setSessionSnsTimelineTotalPosts(null)
+    setSessionSnsTimelineStatsLoading(false)
+  }, [])
+
+  const openSessionSnsTimeline = useCallback(() => {
+    const normalizedSessionId = String(sessionDetail?.wxid || '').trim()
+    if (!isSingleContactSession(normalizedSessionId) || !sessionDetail) return
+
+    const target: SessionSnsTimelineTarget = {
+      username: normalizedSessionId,
+      displayName: sessionDetail.displayName || sessionDetail.remark || sessionDetail.nickName || normalizedSessionId,
+      avatarUrl: sessionDetail.avatarUrl
+    }
+
+    setSessionSnsTimelineTarget(target)
+    setSessionSnsTimelinePosts([])
+    setSessionSnsTimelineHasMore(false)
+    setSessionSnsTimelineLoadingMore(false)
+    setSessionSnsTimelineLoading(false)
+
+    if (snsUserPostCountsStatus === 'ready') {
+      const count = Number(snsUserPostCounts[normalizedSessionId] || 0)
+      setSessionSnsTimelineTotalPosts(Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0)
+      setSessionSnsTimelineStatsLoading(false)
+    } else {
+      setSessionSnsTimelineTotalPosts(null)
+      setSessionSnsTimelineStatsLoading(true)
+    }
+
+    void loadSessionSnsTimelinePosts(target, { reset: true })
+    void loadSnsUserPostCounts()
+  }, [
+    loadSessionSnsTimelinePosts,
+    loadSnsUserPostCounts,
+    sessionDetail,
+    snsUserPostCounts,
+    snsUserPostCountsStatus
+  ])
+
+  const loadMoreSessionSnsTimeline = useCallback(() => {
+    if (!sessionSnsTimelineTarget || sessionSnsTimelineLoading || sessionSnsTimelineLoadingMore || !sessionSnsTimelineHasMore) return
+    void loadSessionSnsTimelinePosts(sessionSnsTimelineTarget, { reset: false })
+  }, [
+    loadSessionSnsTimelinePosts,
+    sessionSnsTimelineHasMore,
+    sessionSnsTimelineLoading,
+    sessionSnsTimelineLoadingMore,
+    sessionSnsTimelineTarget
+  ])
+
+  const renderSessionSnsTimelineStats = useCallback((): string => {
+    const loadedCount = sessionSnsTimelinePosts.length
+    const loadPart = sessionSnsTimelineStatsLoading
+      ? `已加载 ${loadedCount} / 总数统计中...`
+      : sessionSnsTimelineTotalPosts === null
+        ? `已加载 ${loadedCount} 条`
+        : `已加载 ${loadedCount} / 共 ${sessionSnsTimelineTotalPosts} 条`
+
+    if (sessionSnsTimelineLoading && loadedCount === 0) return `${loadPart} ｜ 加载中...`
+    if (loadedCount === 0) return loadPart
+
+    const latest = sessionSnsTimelinePosts[0]?.createTime
+    const earliest = sessionSnsTimelinePosts[sessionSnsTimelinePosts.length - 1]?.createTime
+    const rangeText = `${formatYmdDateFromSeconds(earliest)} ~ ${formatYmdDateFromSeconds(latest)}`
+    return `${loadPart} ｜ ${rangeText}`
+  }, [
+    sessionSnsTimelineLoading,
+    sessionSnsTimelinePosts,
+    sessionSnsTimelineStatsLoading,
+    sessionSnsTimelineTotalPosts
+  ])
 
   const mergeSessionContentMetrics = useCallback((input: Record<string, SessionExportMetric | SessionContentMetric | undefined>) => {
     const entries = Object.entries(input)
@@ -4081,6 +4289,27 @@ function ExportPage() {
       .slice(0, 20)
   }, [sessionDetail?.wxid, exportRecordsBySession])
 
+  const sessionDetailSupportsSnsTimeline = useMemo(() => {
+    const sessionId = String(sessionDetail?.wxid || '').trim()
+    return isSingleContactSession(sessionId)
+  }, [sessionDetail?.wxid])
+
+  const sessionDetailSnsCountLabel = useMemo(() => {
+    const sessionId = String(sessionDetail?.wxid || '').trim()
+    if (!sessionId || !sessionDetailSupportsSnsTimeline) return '朋友圈：0条'
+
+    if (snsUserPostCountsStatus === 'loading' || snsUserPostCountsStatus === 'idle') {
+      return '朋友圈：统计中...'
+    }
+    if (snsUserPostCountsStatus === 'error') {
+      return '朋友圈：统计失败'
+    }
+
+    const count = Number(snsUserPostCounts[sessionId] || 0)
+    const normalized = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
+    return `朋友圈：${normalized}条`
+  }, [sessionDetail?.wxid, sessionDetailSupportsSnsTimeline, snsUserPostCounts, snsUserPostCountsStatus])
+
   const applySessionDetailStats = useCallback((
     sessionId: string,
     metric: SessionExportMetric,
@@ -4371,14 +4600,58 @@ function ExportPage() {
     }
   }, [applySessionDetailStats, isLoadingSessionRelationStats, sessionDetail?.wxid])
 
+  useEffect(() => {
+    if (!showSessionDetailPanel || !sessionDetailSupportsSnsTimeline) return
+    if (snsUserPostCountsStatus === 'idle') {
+      void loadSnsUserPostCounts()
+    }
+  }, [
+    loadSnsUserPostCounts,
+    sessionDetailSupportsSnsTimeline,
+    showSessionDetailPanel,
+    snsUserPostCountsStatus
+  ])
+
+  useEffect(() => {
+    if (!sessionSnsTimelineTarget) return
+    if (snsUserPostCountsStatus === 'loading' || snsUserPostCountsStatus === 'idle') {
+      setSessionSnsTimelineStatsLoading(true)
+      return
+    }
+    if (snsUserPostCountsStatus === 'ready') {
+      const total = Number(snsUserPostCounts[sessionSnsTimelineTarget.username] || 0)
+      setSessionSnsTimelineTotalPosts(Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0)
+      setSessionSnsTimelineStatsLoading(false)
+      return
+    }
+    setSessionSnsTimelineTotalPosts(null)
+    setSessionSnsTimelineStatsLoading(false)
+  }, [sessionSnsTimelineTarget, snsUserPostCounts, snsUserPostCountsStatus])
+
+  useEffect(() => {
+    if (sessionSnsTimelineTotalPosts === null) return
+    if (sessionSnsTimelinePosts.length >= sessionSnsTimelineTotalPosts) {
+      setSessionSnsTimelineHasMore(false)
+    }
+  }, [sessionSnsTimelinePosts.length, sessionSnsTimelineTotalPosts])
+
   const closeSessionDetailPanel = useCallback(() => {
     detailRequestSeqRef.current += 1
     detailStatsPriorityRef.current = false
+    sessionSnsTimelineRequestTokenRef.current += 1
+    sessionSnsTimelineLoadingRef.current = false
     setShowSessionDetailPanel(false)
     setIsLoadingSessionDetail(false)
     setIsLoadingSessionDetailExtra(false)
     setIsRefreshingSessionDetailStats(false)
     setIsLoadingSessionRelationStats(false)
+    setSessionSnsTimelineTarget(null)
+    setSessionSnsTimelinePosts([])
+    setSessionSnsTimelineLoading(false)
+    setSessionSnsTimelineLoadingMore(false)
+    setSessionSnsTimelineHasMore(false)
+    setSessionSnsTimelineTotalPosts(null)
+    setSessionSnsTimelineStatsLoading(false)
   }, [])
 
   const openSessionDetail = useCallback((sessionId: string) => {
@@ -4409,6 +4682,17 @@ function ExportPage() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [showSessionLoadDetailModal])
+
+  useEffect(() => {
+    if (!sessionSnsTimelineTarget) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeSessionSnsTimeline()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [closeSessionSnsTimeline, sessionSnsTimelineTarget])
 
   const handleCopyDetailField = useCallback(async (text: string, field: string) => {
     try {
@@ -5228,6 +5512,21 @@ function ExportPage() {
                         </button>
                       </div>
                     )}
+                    {sessionDetailSupportsSnsTimeline && (
+                      <div className="detail-item">
+                        <Aperture size={14} />
+                        <span className="label">朋友圈</span>
+                        <span className="value">
+                          <button
+                            className="detail-inline-btn detail-sns-entry-btn"
+                            type="button"
+                            onClick={openSessionSnsTimeline}
+                          >
+                            {sessionDetailSnsCountLabel}
+                          </button>
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="detail-section">
@@ -5452,6 +5751,100 @@ function ExportPage() {
                 <div className="detail-empty">暂无详情</div>
               )}
               </aside>
+            </div>
+          )}
+
+          {sessionSnsTimelineTarget && (
+            <div className="export-session-sns-overlay" onClick={closeSessionSnsTimeline}>
+              <div
+                className="export-session-sns-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="联系人朋友圈"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="sns-dialog-header">
+                  <div className="sns-dialog-header-main">
+                    <div className="sns-dialog-avatar">
+                      {sessionSnsTimelineTarget.avatarUrl ? (
+                        <img src={sessionSnsTimelineTarget.avatarUrl} alt="" />
+                      ) : (
+                        <span>{getAvatarLetter(sessionSnsTimelineTarget.displayName || sessionSnsTimelineTarget.username)}</span>
+                      )}
+                    </div>
+                    <div className="sns-dialog-meta">
+                      <h4>{sessionSnsTimelineTarget.displayName}</h4>
+                      <div className="sns-dialog-username">@{sessionSnsTimelineTarget.username}</div>
+                      <div className="sns-dialog-stats">{renderSessionSnsTimelineStats()}</div>
+                    </div>
+                  </div>
+                  <button className="close-btn" type="button" onClick={closeSessionSnsTimeline}>
+                    <X size={16} />
+                  </button>
+                </div>
+
+                <div className="sns-dialog-body">
+                  {sessionSnsTimelinePosts.length > 0 && (
+                    <div className="sns-post-list">
+                      {sessionSnsTimelinePosts.map((post) => (
+                        <article className="sns-post-card" key={post.id}>
+                          <div className="sns-post-time">{formatYmdHmDateTime(post.createTime * 1000)}</div>
+                          {post.contentDesc && <div className="sns-post-content">{post.contentDesc}</div>}
+                          {Array.isArray(post.media) && post.media.length > 0 && (
+                            <div className="sns-post-media-grid">
+                              {post.media.slice(0, 9).map((media, mediaIndex) => {
+                                const mediaUrl = String(media?.url || media?.thumb || '')
+                                const previewUrl = String(media?.thumb || media?.url || '')
+                                if (!mediaUrl || !previewUrl) return null
+                                const isVideo = isSnsVideoMediaUrl(mediaUrl)
+                                return (
+                                  <button
+                                    className="sns-post-media-item"
+                                    key={`${post.id}-media-${mediaIndex}`}
+                                    type="button"
+                                    onClick={() => {
+                                      if (isVideo) {
+                                        void window.electronAPI.window.openVideoPlayerWindow(mediaUrl)
+                                        return
+                                      }
+                                      void window.electronAPI.window.openImageViewerWindow(
+                                        mediaUrl,
+                                        media?.livePhoto?.url || undefined
+                                      )
+                                    }}
+                                  >
+                                    <img src={previewUrl} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                                    {isVideo && <span className="sns-post-media-video-tag">视频</span>}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  )}
+
+                  {sessionSnsTimelineLoading && (
+                    <div className="sns-dialog-status">正在加载该联系人的朋友圈...</div>
+                  )}
+
+                  {!sessionSnsTimelineLoading && sessionSnsTimelinePosts.length === 0 && (
+                    <div className="sns-dialog-status empty">该联系人暂无朋友圈</div>
+                  )}
+
+                  {!sessionSnsTimelineLoading && sessionSnsTimelineHasMore && (
+                    <button
+                      className="sns-dialog-load-more"
+                      type="button"
+                      onClick={loadMoreSessionSnsTimeline}
+                      disabled={sessionSnsTimelineLoadingMore}
+                    >
+                      {sessionSnsTimelineLoadingMore ? '正在加载...' : '加载更多'}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </div>
