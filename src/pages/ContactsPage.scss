@@ -535,6 +535,28 @@
       word-break: break-all;
       user-select: text;
     }
+
+    .detail-entry-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      padding: 6px 10px;
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+
+      &:hover {
+        color: var(--primary);
+        border-color: color-mix(in srgb, var(--primary) 45%, var(--border-color));
+        background: color-mix(in srgb, var(--primary) 8%, var(--bg-secondary));
+      }
+    }
   }
 
   .goto-chat-btn {

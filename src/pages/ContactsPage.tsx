@@ -1,19 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type UIEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download, ChevronDown, MessageCircle, UserX, AlertTriangle, ClipboardList } from 'lucide-react'
+import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download, ChevronDown, MessageCircle, UserX, AlertTriangle, ClipboardList, Aperture } from 'lucide-react'
 import { useChatStore } from '../stores/chatStore'
 import { toContactTypeCardCounts, useContactTypeCountsStore } from '../stores/contactTypeCountsStore'
 import * as configService from '../services/config'
+import type { ContactInfo } from '../types/models'
+import { ContactSnsTimelineDialog } from '../components/Sns/ContactSnsTimelineDialog'
+import { type ContactSnsTimelineTarget, isSingleContactSession } from '../components/Sns/contactSnsTimeline'
 import './ContactsPage.scss'
-
-interface ContactInfo {
-    username: string
-    displayName: string
-    remark?: string
-    nickname?: string
-    avatarUrl?: string
-    type: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
-}
 
 interface ContactEnrichInfo {
     displayName?: string
@@ -62,6 +56,9 @@ function ContactsPage() {
     // 导出模式与查看详情
     const [exportMode, setExportMode] = useState(false)
     const [selectedContact, setSelectedContact] = useState<ContactInfo | null>(null)
+    const [snsUserPostCounts, setSnsUserPostCounts] = useState<Record<string, number>>({})
+    const [snsUserPostCountsStatus, setSnsUserPostCountsStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+    const [snsTimelineTarget, setSnsTimelineTarget] = useState<ContactSnsTimelineTarget | null>(null)
     const navigate = useNavigate()
     const { setCurrentSession } = useChatStore()
 
@@ -509,6 +506,41 @@ function ContactsPage() {
         return () => window.clearTimeout(timer)
     }, [searchKeyword])
 
+    const loadSnsUserPostCounts = useCallback(async (options?: { force?: boolean }) => {
+        if (!options?.force && (snsUserPostCountsStatus === 'loading' || snsUserPostCountsStatus === 'ready')) {
+            return
+        }
+
+        setSnsUserPostCountsStatus('loading')
+        try {
+            const result = await window.electronAPI.sns.getUserPostCounts()
+            if (!result.success || !result.counts) {
+                setSnsUserPostCountsStatus('error')
+                return
+            }
+
+            const normalizedCounts: Record<string, number> = {}
+            for (const [rawUsername, rawCount] of Object.entries(result.counts)) {
+                const username = String(rawUsername || '').trim()
+                if (!username) continue
+                const value = Number(rawCount)
+                normalizedCounts[username] = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+            }
+
+            setSnsUserPostCounts(normalizedCounts)
+            setSnsUserPostCountsStatus('ready')
+        } catch (error) {
+            console.error('加载通讯录联系人朋友圈条数失败:', error)
+            setSnsUserPostCountsStatus('error')
+        }
+    }, [snsUserPostCountsStatus])
+
+    useEffect(() => {
+        if (!selectedContact || !isSingleContactSession(selectedContact.username)) return
+        if (snsUserPostCountsStatus !== 'idle') return
+        void loadSnsUserPostCounts()
+    }, [loadSnsUserPostCounts, selectedContact, snsUserPostCountsStatus])
+
     const filteredContacts = useMemo(() => {
         let filtered = contacts.filter(contact => {
             if (contact.type === 'friend' && !contactTypes.friends) return false
@@ -578,6 +610,38 @@ function ContactsPage() {
         }, 0)
     }, [filteredContacts, selectedUsernames])
     const allFilteredSelected = filteredContacts.length > 0 && selectedInFilteredCount === filteredContacts.length
+
+    const selectedContactSupportsSns = useMemo(() => {
+        return Boolean(selectedContact && isSingleContactSession(selectedContact.username))
+    }, [selectedContact])
+
+    const selectedContactSnsCount = useMemo(() => {
+        if (!selectedContactSupportsSns || !selectedContact) return null
+        if (snsUserPostCountsStatus !== 'ready') return null
+        const rawCount = Number(snsUserPostCounts[selectedContact.username] || 0)
+        return Number.isFinite(rawCount) ? Math.max(0, Math.floor(rawCount)) : 0
+    }, [selectedContact, selectedContactSupportsSns, snsUserPostCounts, snsUserPostCountsStatus])
+
+    const selectedContactSnsEntryLabel = useMemo(() => {
+        if (!selectedContactSupportsSns) return ''
+        if (selectedContactSnsCount !== null) {
+            return `朋友圈：${selectedContactSnsCount.toLocaleString('zh-CN')}条`
+        }
+        if (snsUserPostCountsStatus === 'error') return '朋友圈：查看'
+        return '朋友圈：统计中...'
+    }, [selectedContactSupportsSns, selectedContactSnsCount, snsUserPostCountsStatus])
+
+    const openSelectedContactSnsTimeline = useCallback(() => {
+        if (!selectedContact || !selectedContactSupportsSns) return
+        if (snsUserPostCountsStatus === 'idle') {
+            void loadSnsUserPostCounts()
+        }
+        setSnsTimelineTarget({
+            username: selectedContact.username,
+            displayName: selectedContact.displayName || selectedContact.remark || selectedContact.nickname || selectedContact.username,
+            avatarUrl: selectedContact.avatarUrl
+        })
+    }, [loadSnsUserPostCounts, selectedContact, selectedContactSupportsSns, snsUserPostCountsStatus])
 
     const { startIndex, endIndex } = useMemo(() => {
         if (filteredContacts.length === 0) {
@@ -1069,6 +1133,19 @@ function ContactsPage() {
                             <div className="detail-row"><span className="detail-label">昵称</span><span className="detail-value">{selectedContact.nickname || selectedContact.displayName}</span></div>
                             {selectedContact.remark && <div className="detail-row"><span className="detail-label">备注</span><span className="detail-value">{selectedContact.remark}</span></div>}
                             <div className="detail-row"><span className="detail-label">类型</span><span className="detail-value">{getContactTypeName(selectedContact.type)}</span></div>
+                            {selectedContactSupportsSns && (
+                                <div className="detail-row">
+                                    <span className="detail-label">朋友圈</span>
+                                    <button
+                                        type="button"
+                                        className="detail-entry-btn"
+                                        onClick={openSelectedContactSnsTimeline}
+                                    >
+                                        <Aperture size={14} />
+                                        <span>{selectedContactSnsEntryLabel}</span>
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
                         <button
@@ -1091,6 +1168,14 @@ function ContactsPage() {
                     </div>
                 </div>
             )}
+            <ContactSnsTimelineDialog
+                target={snsTimelineTarget}
+                onClose={() => setSnsTimelineTarget(null)}
+                initialTotalPosts={selectedContact && snsTimelineTarget?.username === selectedContact.username ? selectedContactSnsCount : null}
+                initialTotalPostsLoading={selectedContact && snsTimelineTarget?.username === selectedContact.username
+                    ? snsUserPostCountsStatus === 'idle' || snsUserPostCountsStatus === 'loading'
+                    : false}
+            />
         </div>
     )
 }
