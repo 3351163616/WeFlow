@@ -6499,22 +6499,18 @@ function ExportPage() {
                       {filteredSessionMutualFriendsDialogItems.map((item, index) => (
                         <div className="session-mutual-friends-row" key={`${sessionMutualFriendsDialogTarget.username}-${item.name}`}>
                           <span className="session-mutual-friends-rank">{index + 1}</span>
-                          <div className="session-mutual-friends-main">
-                            <span className="session-mutual-friends-name" title={item.name}>{item.name}</span>
-                            <div className="session-mutual-friends-tags">
-                              <span className={`session-mutual-friends-source ${item.direction}`}>
-                                {getSessionMutualFriendDirectionLabel(item.direction)}
-                              </span>
-                              <span className={`session-mutual-friends-source session-mutual-friends-behavior ${item.behavior}`}>
-                                {getSessionMutualFriendBehaviorLabel(item.behavior)}
-                              </span>
-                            </div>
-                            <div className="session-mutual-friends-desc">
-                              {describeSessionMutualFriendRelation(item, sessionMutualFriendsDialogTarget.displayName)}
-                            </div>
-                          </div>
+                          <span className="session-mutual-friends-name" title={item.name}>{item.name}</span>
+                          <span className={`session-mutual-friends-source ${item.direction}`}>
+                            {getSessionMutualFriendDirectionLabel(item.direction)}
+                          </span>
                           <span className="session-mutual-friends-count">{item.totalCount.toLocaleString('zh-CN')}</span>
                           <span className="session-mutual-friends-latest">{formatYmdDateFromSeconds(item.latestTime)}</span>
+                          <span
+                            className="session-mutual-friends-desc"
+                            title={describeSessionMutualFriendRelation(item, sessionMutualFriendsDialogTarget.displayName)}
+                          >
+                            {describeSessionMutualFriendRelation(item, sessionMutualFriendsDialogTarget.displayName)}
+                          </span>
                         </div>
                       ))}
                     </div>

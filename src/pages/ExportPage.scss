@@ -405,13 +405,14 @@
 
 .session-mutual-friends-row {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 72px 110px;
+  grid-template-columns: 36px minmax(120px, 0.82fr) max-content 56px 96px minmax(0, 1.28fr);
   gap: 10px;
-  align-items: start;
-  padding: 11px 12px;
+  align-items: center;
+  padding: 8px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--border-color) 68%, transparent);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
+  min-height: 42px;
 
   &:last-child {
     border-bottom: none;
@@ -426,14 +427,7 @@
 
 .session-mutual-friends-rank {
   color: var(--text-tertiary);
-  padding-top: 3px;
-}
-
-.session-mutual-friends-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  text-align: center;
 }
 
 .session-mutual-friends-name {
@@ -445,22 +439,16 @@
   font-weight: 600;
 }
 
-.session-mutual-friends-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
 .session-mutual-friends-source {
   justify-self: start;
   border-radius: 999px;
-  padding: 4px 8px;
-  font-size: 11px;
+  padding: 3px 8px;
+  font-size: 10px;
   line-height: 1;
   border: 1px solid var(--border-color);
   background: var(--bg-secondary);
   color: var(--text-secondary);
+  white-space: nowrap;
 
   &.incoming {
     color: #065f46;
@@ -481,37 +469,20 @@
   }
 }
 
-.session-mutual-friends-behavior {
-  &.likes {
-    color: #1d4ed8;
-    border-color: color-mix(in srgb, #3b82f6 34%, var(--border-color));
-    background: color-mix(in srgb, #3b82f6 9%, var(--bg-secondary));
-  }
-
-  &.comments {
-    color: #7c3aed;
-    border-color: color-mix(in srgb, #8b5cf6 34%, var(--border-color));
-    background: color-mix(in srgb, #8b5cf6 9%, var(--bg-secondary));
-  }
-
-  &.both {
-    color: #be185d;
-    border-color: color-mix(in srgb, #ec4899 34%, var(--border-color));
-    background: color-mix(in srgb, #ec4899 9%, var(--bg-secondary));
-  }
-}
-
 .session-mutual-friends-desc {
   min-width: 0;
   color: var(--text-tertiary);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-mutual-friends-count,
 .session-mutual-friends-latest {
   text-align: right;
-  padding-top: 3px;
+  white-space: nowrap;
 }
 
 .session-mutual-friends-empty {
@@ -3877,9 +3848,13 @@
   }
 
   .session-mutual-friends-row {
-    grid-template-columns: 34px minmax(0, 1fr) 56px 88px;
+    grid-template-columns: 30px minmax(88px, 0.9fr) max-content 44px 74px;
     gap: 8px;
     font-size: 12px;
+  }
+
+  .session-mutual-friends-desc {
+    display: none;
   }
 
   .session-load-detail-row {
