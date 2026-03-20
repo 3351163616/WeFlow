@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, X } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import {
   EXPORT_DATE_RANGE_PRESETS,
   WEEKDAY_SHORT_LABELS,
@@ -29,15 +29,15 @@ interface ExportDateRangeDialogProps {
   onConfirm: (value: ExportDateRangeSelection) => void
 }
 
+type ActiveBoundary = 'start' | 'end'
+
 interface ExportDateRangeDialogDraft extends ExportDateRangeSelection {
-  startPanelMonth: Date
-  endPanelMonth: Date
+  panelMonth: Date
 }
 
 const buildDialogDraft = (value: ExportDateRangeSelection): ExportDateRangeDialogDraft => ({
   ...cloneExportDateRangeSelection(value),
-  startPanelMonth: toMonthStart(value.dateRange.start),
-  endPanelMonth: toMonthStart(value.dateRange.end)
+  panelMonth: toMonthStart(value.dateRange.start)
 })
 
 export function ExportDateRangeDialog({
@@ -48,6 +48,7 @@ export function ExportDateRangeDialog({
   onConfirm
 }: ExportDateRangeDialogProps) {
   const [draft, setDraft] = useState<ExportDateRangeDialogDraft>(() => buildDialogDraft(value))
+  const [activeBoundary, setActiveBoundary] = useState<ActiveBoundary>('start')
   const [dateInput, setDateInput] = useState({
     start: formatDateInputValue(value.dateRange.start),
     end: formatDateInputValue(value.dateRange.end)
@@ -58,6 +59,7 @@ export function ExportDateRangeDialog({
     if (!open) return
     const nextDraft = buildDialogDraft(value)
     setDraft(nextDraft)
+    setActiveBoundary('start')
     setDateInput({
       start: formatDateInputValue(nextDraft.dateRange.start),
       end: formatDateInputValue(nextDraft.dateRange.end)
@@ -74,32 +76,7 @@ export function ExportDateRangeDialog({
     setDateInputError({ start: false, end: false })
   }, [draft.dateRange.end.getTime(), draft.dateRange.start.getTime(), open])
 
-  const applyPreset = useCallback((preset: Exclude<ExportDateRangePreset, 'custom'>) => {
-    if (preset === 'all') {
-      const previewRange = createDefaultDateRange()
-      setDraft(prev => ({
-        ...prev,
-        preset,
-        useAllTime: true,
-        dateRange: previewRange,
-        startPanelMonth: toMonthStart(previewRange.start),
-        endPanelMonth: toMonthStart(previewRange.end)
-      }))
-      return
-    }
-
-    const range = createDateRangeByPreset(preset)
-    setDraft(prev => ({
-      ...prev,
-      preset,
-      useAllTime: false,
-      dateRange: range,
-      startPanelMonth: toMonthStart(range.start),
-      endPanelMonth: toMonthStart(range.end)
-    }))
-  }, [])
-
-  const updateDraftStart = useCallback((targetDate: Date) => {
+  const setRangeStart = useCallback((targetDate: Date) => {
     const start = startOfDay(targetDate)
     setDraft(prev => {
       const nextEnd = prev.dateRange.end < start ? endOfDay(start) : prev.dateRange.end
@@ -111,13 +88,12 @@ export function ExportDateRangeDialog({
           start,
           end: nextEnd
         },
-        startPanelMonth: toMonthStart(start),
-        endPanelMonth: toMonthStart(nextEnd)
+        panelMonth: toMonthStart(start)
       }
     })
   }, [])
 
-  const updateDraftEnd = useCallback((targetDate: Date) => {
+  const setRangeEnd = useCallback((targetDate: Date) => {
     const end = endOfDay(targetDate)
     setDraft(prev => {
       const nextStart = prev.useAllTime ? startOfDay(targetDate) : prev.dateRange.start
@@ -130,10 +106,34 @@ export function ExportDateRangeDialog({
           start: nextStart,
           end: nextEnd
         },
-        startPanelMonth: toMonthStart(nextStart),
-        endPanelMonth: toMonthStart(nextEnd)
+        panelMonth: toMonthStart(targetDate)
       }
     })
+  }, [])
+
+  const applyPreset = useCallback((preset: Exclude<ExportDateRangePreset, 'custom'>) => {
+    if (preset === 'all') {
+      const previewRange = createDefaultDateRange()
+      setDraft(prev => ({
+        ...prev,
+        preset,
+        useAllTime: true,
+        dateRange: previewRange,
+        panelMonth: toMonthStart(previewRange.start)
+      }))
+      setActiveBoundary('start')
+      return
+    }
+
+    const range = createDateRangeByPreset(preset)
+    setDraft(prev => ({
+      ...prev,
+      preset,
+      useAllTime: false,
+      dateRange: range,
+      panelMonth: toMonthStart(range.start)
+    }))
+    setActiveBoundary('start')
   }, [])
 
   const commitStartFromInput = useCallback(() => {
@@ -143,8 +143,8 @@ export function ExportDateRangeDialog({
       return
     }
     setDateInputError(prev => ({ ...prev, start: false }))
-    updateDraftStart(parsed)
-  }, [dateInput.start, updateDraftStart])
+    setRangeStart(parsed)
+  }, [dateInput.start, setRangeStart])
 
   const commitEndFromInput = useCallback(() => {
     const parsed = parseDateInputValue(dateInput.end)
@@ -153,29 +153,71 @@ export function ExportDateRangeDialog({
       return
     }
     setDateInputError(prev => ({ ...prev, end: false }))
-    updateDraftEnd(parsed)
-  }, [dateInput.end, updateDraftEnd])
+    setRangeEnd(parsed)
+  }, [dateInput.end, setRangeEnd])
 
-  const shiftPanelMonth = useCallback((panel: 'start' | 'end', delta: number) => {
-    setDraft(prev => (
-      panel === 'start'
-        ? { ...prev, startPanelMonth: addMonths(prev.startPanelMonth, delta) }
-        : { ...prev, endPanelMonth: addMonths(prev.endPanelMonth, delta) }
-    ))
+  const shiftPanelMonth = useCallback((delta: number) => {
+    setDraft(prev => ({
+      ...prev,
+      panelMonth: addMonths(prev.panelMonth, delta)
+    }))
   }, [])
+
+  const handleCalendarSelect = useCallback((targetDate: Date) => {
+    if (activeBoundary === 'start') {
+      setRangeStart(targetDate)
+      setActiveBoundary('end')
+      return
+    }
+
+    setDraft(prev => {
+      const start = prev.useAllTime ? startOfDay(targetDate) : prev.dateRange.start
+      const pickedStart = startOfDay(targetDate)
+      const nextStart = pickedStart <= start ? pickedStart : start
+      const nextEnd = pickedStart <= start ? endOfDay(start) : endOfDay(targetDate)
+      return {
+        ...prev,
+        preset: 'custom',
+        useAllTime: false,
+        dateRange: {
+          start: nextStart,
+          end: nextEnd
+        },
+        panelMonth: toMonthStart(targetDate)
+      }
+    })
+    setActiveBoundary('start')
+  }, [activeBoundary, setRangeEnd, setRangeStart])
 
   const isRangeModeActive = !draft.useAllTime
   const modeText = isRangeModeActive
     ? '当前导出模式：按时间范围导出'
-    : '当前导出模式：全部时间导出（选择下方日期将切换为按时间范围导出）'
+    : '当前导出模式：全部时间导出，选择下方日期会切换为自定义时间范围'
 
   const isPresetActive = useCallback((preset: ExportDateRangePreset): boolean => {
     if (preset === 'all') return draft.useAllTime
     return !draft.useAllTime && draft.preset === preset
   }, [draft])
 
-  const startPanelCells = useMemo(() => buildCalendarCells(draft.startPanelMonth), [draft.startPanelMonth])
-  const endPanelCells = useMemo(() => buildCalendarCells(draft.endPanelMonth), [draft.endPanelMonth])
+  const calendarCells = useMemo(() => buildCalendarCells(draft.panelMonth), [draft.panelMonth])
+
+  const isStartSelected = useCallback((date: Date) => (
+    !draft.useAllTime && isSameDay(date, draft.dateRange.start)
+  ), [draft])
+
+  const isEndSelected = useCallback((date: Date) => (
+    !draft.useAllTime && isSameDay(date, draft.dateRange.end)
+  ), [draft])
+
+  const isDateInRange = useCallback((date: Date) => (
+    !draft.useAllTime &&
+    startOfDay(date).getTime() >= startOfDay(draft.dateRange.start).getTime() &&
+    startOfDay(date).getTime() <= startOfDay(draft.dateRange.end).getTime()
+  ), [draft])
+
+  const hintText = draft.useAllTime
+    ? '选择开始或结束日期后，会自动切换为自定义时间范围'
+    : (activeBoundary === 'start' ? '下一次点击将设置开始日期' : '下一次点击将设置结束日期')
 
   if (!open) return null
 
@@ -215,111 +257,111 @@ export function ExportDateRangeDialog({
           {modeText}
         </div>
 
-        <div className="export-date-range-calendar-grid">
-          <section className="export-date-range-calendar-panel">
-            <div className="export-date-range-calendar-panel-header">
-              <div className="export-date-range-calendar-date-label">
-                <span>起始日期</span>
-                <input
-                  type="text"
-                  className={`export-date-range-date-input ${dateInputError.start ? 'invalid' : ''}`}
-                  value={dateInput.start}
-                  placeholder="YYYY-MM-DD"
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setDateInput(prev => ({ ...prev, start: nextValue }))
-                    if (dateInputError.start) {
-                      setDateInputError(prev => ({ ...prev, start: false }))
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return
-                    event.preventDefault()
-                    commitStartFromInput()
-                  }}
-                  onBlur={commitStartFromInput}
-                />
-              </div>
-              <div className="export-date-range-calendar-nav">
-                <button type="button" onClick={() => shiftPanelMonth('start', -1)} aria-label="上个月">‹</button>
-                <span>{formatCalendarMonthTitle(draft.startPanelMonth)}</span>
-                <button type="button" onClick={() => shiftPanelMonth('start', 1)} aria-label="下个月">›</button>
-              </div>
-            </div>
-            <div className="export-date-range-calendar-weekdays">
-              {WEEKDAY_SHORT_LABELS.map(label => (
-                <span key={`start-weekday-${label}`}>{label}</span>
-              ))}
-            </div>
-            <div className="export-date-range-calendar-days">
-              {startPanelCells.map((cell) => {
-                const selected = !draft.useAllTime && isSameDay(cell.date, draft.dateRange.start)
-                return (
-                  <button
-                    key={`start-${cell.date.getTime()}`}
-                    type="button"
-                    className={`export-date-range-calendar-day ${cell.inCurrentMonth ? '' : 'outside'} ${selected ? 'selected' : ''}`}
-                    onClick={() => updateDraftStart(cell.date)}
-                  >
-                    {cell.date.getDate()}
-                  </button>
-                )
-              })}
-            </div>
-          </section>
-
-          <section className="export-date-range-calendar-panel">
-            <div className="export-date-range-calendar-panel-header">
-              <div className="export-date-range-calendar-date-label">
-                <span>截止日期</span>
-                <input
-                  type="text"
-                  className={`export-date-range-date-input ${dateInputError.end ? 'invalid' : ''}`}
-                  value={dateInput.end}
-                  placeholder="YYYY-MM-DD"
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setDateInput(prev => ({ ...prev, end: nextValue }))
-                    if (dateInputError.end) {
-                      setDateInputError(prev => ({ ...prev, end: false }))
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter') return
-                    event.preventDefault()
-                    commitEndFromInput()
-                  }}
-                  onBlur={commitEndFromInput}
-                />
-              </div>
-              <div className="export-date-range-calendar-nav">
-                <button type="button" onClick={() => shiftPanelMonth('end', -1)} aria-label="上个月">‹</button>
-                <span>{formatCalendarMonthTitle(draft.endPanelMonth)}</span>
-                <button type="button" onClick={() => shiftPanelMonth('end', 1)} aria-label="下个月">›</button>
-              </div>
-            </div>
-            <div className="export-date-range-calendar-weekdays">
-              {WEEKDAY_SHORT_LABELS.map(label => (
-                <span key={`end-weekday-${label}`}>{label}</span>
-              ))}
-            </div>
-            <div className="export-date-range-calendar-days">
-              {endPanelCells.map((cell) => {
-                const selected = !draft.useAllTime && isSameDay(cell.date, draft.dateRange.end)
-                return (
-                  <button
-                    key={`end-${cell.date.getTime()}`}
-                    type="button"
-                    className={`export-date-range-calendar-day ${cell.inCurrentMonth ? '' : 'outside'} ${selected ? 'selected' : ''}`}
-                    onClick={() => updateDraftEnd(cell.date)}
-                  >
-                    {cell.date.getDate()}
-                  </button>
-                )
-              })}
-            </div>
-          </section>
+        <div className="export-date-range-boundary-row">
+          <div
+            className={`export-date-range-boundary-card ${activeBoundary === 'start' ? 'active' : ''}`}
+            onClick={() => setActiveBoundary('start')}
+          >
+            <span className="boundary-label">开始</span>
+            <input
+              type="text"
+              className={`export-date-range-date-input ${dateInputError.start ? 'invalid' : ''}`}
+              value={dateInput.start}
+              placeholder="YYYY-MM-DD"
+              onChange={(event) => {
+                const nextValue = event.target.value
+                setDateInput(prev => ({ ...prev, start: nextValue }))
+                if (dateInputError.start) {
+                  setDateInputError(prev => ({ ...prev, start: false }))
+                }
+              }}
+              onFocus={() => setActiveBoundary('start')}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                commitStartFromInput()
+              }}
+              onBlur={commitStartFromInput}
+            />
+          </div>
+          <div
+            className={`export-date-range-boundary-card ${activeBoundary === 'end' ? 'active' : ''}`}
+            onClick={() => setActiveBoundary('end')}
+          >
+            <span className="boundary-label">结束</span>
+            <input
+              type="text"
+              className={`export-date-range-date-input ${dateInputError.end ? 'invalid' : ''}`}
+              value={dateInput.end}
+              placeholder="YYYY-MM-DD"
+              onChange={(event) => {
+                const nextValue = event.target.value
+                setDateInput(prev => ({ ...prev, end: nextValue }))
+                if (dateInputError.end) {
+                  setDateInputError(prev => ({ ...prev, end: false }))
+                }
+              }}
+              onFocus={() => setActiveBoundary('end')}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return
+                event.preventDefault()
+                commitEndFromInput()
+              }}
+              onBlur={commitEndFromInput}
+            />
+          </div>
         </div>
+
+        <div className="export-date-range-selection-hint">{hintText}</div>
+
+        <section className="export-date-range-calendar-panel single">
+          <div className="export-date-range-calendar-panel-header">
+            <div className="export-date-range-calendar-date-label">
+              <span>选择日期范围</span>
+              <strong>{formatCalendarMonthTitle(draft.panelMonth)}</strong>
+            </div>
+            <div className="export-date-range-calendar-nav">
+              <button type="button" onClick={() => shiftPanelMonth(-1)} aria-label="上个月">
+                <ChevronLeft size={14} />
+              </button>
+              <button type="button" onClick={() => shiftPanelMonth(1)} aria-label="下个月">
+                <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+          <div className="export-date-range-calendar-weekdays">
+            {WEEKDAY_SHORT_LABELS.map(label => (
+              <span key={`weekday-${label}`}>{label}</span>
+            ))}
+          </div>
+          <div className="export-date-range-calendar-days">
+            {calendarCells.map((cell) => {
+              const startSelected = isStartSelected(cell.date)
+              const endSelected = isEndSelected(cell.date)
+              const inRange = isDateInRange(cell.date)
+              return (
+                <button
+                  key={cell.date.getTime()}
+                  type="button"
+                  className={[
+                    'export-date-range-calendar-day',
+                    cell.inCurrentMonth ? '' : 'outside',
+                    inRange ? 'in-range' : '',
+                    startSelected ? 'range-start' : '',
+                    endSelected ? 'range-end' : '',
+                    activeBoundary === 'start' && startSelected ? 'active-boundary' : '',
+                    activeBoundary === 'end' && endSelected ? 'active-boundary' : ''
+                  ].filter(Boolean).join(' ')}
+                  onClick={() => handleCalendarSelect(cell.date)}
+                >
+                  {cell.date.getDate()}
+                </button>
+              )
+            })}
+          </div>
+        </section>
 
         <div className="export-date-range-dialog-actions">
           <button type="button" className="export-date-range-dialog-btn secondary" onClick={onClose}>
