@@ -6,6 +6,10 @@ on:
     - cron: "0 16 * * *"
   workflow_dispatch:
 
+concurrency:
+  group: dev-daily-fixed-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -278,7 +282,16 @@ jobs:
             exit 0
           fi
 
-          ASSETS_JSON="$(gh release view "$TAG" --repo "$REPO" --json assets)"
+          RELEASE_JSON="$(gh release view "$TAG" --repo "$REPO" --json id,tagName,isDraft,isPrerelease,url,assets)"
+          RELEASE_ID="$(echo "$RELEASE_JSON" | jq -r '.id')"
+          RELEASE_TAG="$(echo "$RELEASE_JSON" | jq -r '.tagName')"
+          RELEASE_DRAFT="$(echo "$RELEASE_JSON" | jq -r '.isDraft')"
+          RELEASE_PRERELEASE="$(echo "$RELEASE_JSON" | jq -r '.isPrerelease')"
+          RELEASE_URL="$(echo "$RELEASE_JSON" | jq -r '.url')"
+          ASSETS_JSON="$(echo "$RELEASE_JSON" | jq -c '{assets: .assets}')"
+
+          echo "Resolved release id=$RELEASE_ID tag=$RELEASE_TAG draft=$RELEASE_DRAFT prerelease=$RELEASE_PRERELEASE"
+          echo "Resolved release url=$RELEASE_URL"
 
           pick_asset() {
             local pattern="$1"
@@ -327,4 +340,18 @@ jobs:
           - 如某个平台资源暂未生成，请进入[发布页]($RELEASE_PAGE)查看最新状态
           EOF
 
-          gh release edit "$TAG" --repo "$REPO" --title "Daily Dev Build" --notes-file dev_release_notes.md
+          # Use release id to avoid tag resolution ambiguity, and force status to prerelease (not draft).
+          jq -n \
+            --arg name "Daily Dev Build" \
+            --arg body "$(cat dev_release_notes.md)" \
+            '{name: $name, body: $body, draft: false, prerelease: true, make_latest: "false"}' \
+            > release_patch_payload.json
+
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$REPO/releases/$RELEASE_ID" \
+            --input release_patch_payload.json >/dev/null
+
+          FINAL_STATUS="$(gh release view "$TAG" --repo "$REPO" --json isDraft,isPrerelease,url)"
+          echo "Final release status: $(echo "$FINAL_STATUS" | jq -c '.')"
