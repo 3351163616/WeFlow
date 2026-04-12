@@ -1,6 +1,7 @@
 // 配置服务 - 封装 Electron Store
 import { config } from './ipc'
 import type { ExportDefaultDateRangeConfig } from '../utils/exportDateRange'
+import type { ExportAutomationTask } from '../types/exportAutomation'
 
 // 配置键名
 export const CONFIG_KEYS = {
@@ -48,6 +49,7 @@ export const CONFIG_KEYS = {
   EXPORT_SNS_STATS_CACHE_MAP: 'exportSnsStatsCacheMap',
   EXPORT_SNS_USER_POST_COUNTS_CACHE_MAP: 'exportSnsUserPostCountsCacheMap',
   EXPORT_SESSION_MUTUAL_FRIENDS_CACHE_MAP: 'exportSessionMutualFriendsCacheMap',
+  EXPORT_AUTOMATION_TASK_MAP: 'exportAutomationTaskMap',
   SNS_PAGE_CACHE_MAP: 'snsPageCacheMap',
   CONTACTS_LOAD_TIMEOUT_MS: 'contactsLoadTimeoutMs',
   CONTACTS_LIST_CACHE_MAP: 'contactsListCacheMap',
@@ -188,6 +190,10 @@ export async function getWxidConfigs(): Promise<Record<string, WxidConfig>> {
     return value as Record<string, WxidConfig>
   }
   return {}
+}
+
+export async function setWxidConfigs(configs: Record<string, WxidConfig>): Promise<void> {
+  await config.set(CONFIG_KEYS.WXID_CONFIGS, configs || {})
 }
 
 export async function getWxidConfig(wxid: string): Promise<WxidConfig | null> {
@@ -658,6 +664,183 @@ export async function getExportLastSnsPostCount(): Promise<number> {
 export async function setExportLastSnsPostCount(count: number): Promise<void> {
   const normalized = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0
   await config.set(CONFIG_KEYS.EXPORT_LAST_SNS_POST_COUNT, normalized)
+}
+
+export interface ExportAutomationTaskMapItem {
+  updatedAt: number
+  tasks: ExportAutomationTask[]
+}
+
+const normalizeAutomationNumeric = (value: unknown, fallback: number): number => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return fallback
+  return Math.floor(numeric)
+}
+
+const normalizeAutomationTask = (raw: unknown): ExportAutomationTask | null => {
+  if (!raw || typeof raw !== 'object') return null
+  const source = raw as Record<string, unknown>
+
+  const id = String(source.id || '').trim()
+  const name = String(source.name || '').trim()
+  if (!id || !name) return null
+
+  const sessionIds = Array.isArray(source.sessionIds)
+    ? Array.from(new Set(source.sessionIds.map((item) => String(item || '').trim()).filter(Boolean)))
+    : []
+  const sessionNames = Array.isArray(source.sessionNames)
+    ? source.sessionNames.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  if (sessionIds.length === 0) return null
+
+  const scheduleRaw = source.schedule
+  if (!scheduleRaw || typeof scheduleRaw !== 'object') return null
+  const scheduleObj = scheduleRaw as Record<string, unknown>
+  const scheduleType = String(scheduleObj.type || '').trim() as ExportAutomationTask['schedule']['type']
+  let schedule: ExportAutomationTask['schedule'] | null = null
+  if (scheduleType === 'interval') {
+    const rawDays = Math.max(0, normalizeAutomationNumeric(scheduleObj.intervalDays, 0))
+    const rawHours = Math.max(0, normalizeAutomationNumeric(scheduleObj.intervalHours, 0))
+    const totalHours = (rawDays * 24) + rawHours
+    if (totalHours <= 0) return null
+    const intervalDays = Math.floor(totalHours / 24)
+    const intervalHours = totalHours % 24
+    schedule = { type: 'interval', intervalDays, intervalHours }
+  }
+  if (!schedule) return null
+
+  const conditionRaw = source.condition
+  if (!conditionRaw || typeof conditionRaw !== 'object') return null
+  const conditionType = String((conditionRaw as Record<string, unknown>).type || '').trim()
+  if (conditionType !== 'new-message-since-last-success') return null
+
+  const templateRaw = source.template
+  if (!templateRaw || typeof templateRaw !== 'object') return null
+  const template = templateRaw as Record<string, unknown>
+  const scope = String(template.scope || '').trim() as ExportAutomationTask['template']['scope']
+  if (scope !== 'single' && scope !== 'multi' && scope !== 'content') return null
+  const optionTemplate = template.optionTemplate
+  if (!optionTemplate || typeof optionTemplate !== 'object') return null
+  const dateRangeConfig = template.dateRangeConfig
+  const outputDirRaw = String(source.outputDir || '').trim()
+  const runStateRaw = source.runState && typeof source.runState === 'object'
+    ? (source.runState as Record<string, unknown>)
+    : null
+  const stopConditionRaw = source.stopCondition && typeof source.stopCondition === 'object'
+    ? (source.stopCondition as Record<string, unknown>)
+    : null
+  const rawContentType = String(template.contentType || '').trim()
+  const contentType = (
+    rawContentType === 'text' ||
+    rawContentType === 'voice' ||
+    rawContentType === 'image' ||
+    rawContentType === 'video' ||
+    rawContentType === 'emoji' ||
+    rawContentType === 'file'
+  )
+    ? rawContentType
+    : undefined
+  const rawRunStatus = runStateRaw ? String(runStateRaw.lastRunStatus || '').trim() : ''
+  const lastRunStatus = (
+    rawRunStatus === 'idle' ||
+    rawRunStatus === 'queued' ||
+    rawRunStatus === 'running' ||
+    rawRunStatus === 'success' ||
+    rawRunStatus === 'error' ||
+    rawRunStatus === 'skipped'
+  )
+    ? rawRunStatus
+    : undefined
+  const endAt = stopConditionRaw ? Math.max(0, normalizeAutomationNumeric(stopConditionRaw.endAt, 0)) : 0
+  const maxRuns = stopConditionRaw ? Math.max(0, normalizeAutomationNumeric(stopConditionRaw.maxRuns, 0)) : 0
+
+  return {
+    id,
+    name,
+    enabled: source.enabled !== false,
+    sessionIds,
+    sessionNames,
+    outputDir: outputDirRaw || undefined,
+    schedule,
+    condition: { type: 'new-message-since-last-success' },
+    stopCondition: (endAt > 0 || maxRuns > 0)
+      ? {
+          endAt: endAt > 0 ? endAt : undefined,
+          maxRuns: maxRuns > 0 ? maxRuns : undefined
+        }
+      : undefined,
+    template: {
+      scope,
+      contentType,
+      optionTemplate: optionTemplate as ExportAutomationTask['template']['optionTemplate'],
+      dateRangeConfig: (dateRangeConfig ?? null) as ExportAutomationTask['template']['dateRangeConfig']
+    },
+    runState: runStateRaw
+      ? {
+          lastRunStatus,
+          lastTriggeredAt: normalizeAutomationNumeric(runStateRaw.lastTriggeredAt, 0) || undefined,
+          lastStartedAt: normalizeAutomationNumeric(runStateRaw.lastStartedAt, 0) || undefined,
+          lastFinishedAt: normalizeAutomationNumeric(runStateRaw.lastFinishedAt, 0) || undefined,
+          lastSuccessAt: normalizeAutomationNumeric(runStateRaw.lastSuccessAt, 0) || undefined,
+          lastSkipAt: normalizeAutomationNumeric(runStateRaw.lastSkipAt, 0) || undefined,
+          lastSkipReason: String(runStateRaw.lastSkipReason || '').trim() || undefined,
+          lastError: String(runStateRaw.lastError || '').trim() || undefined,
+          lastScheduleKey: String(runStateRaw.lastScheduleKey || '').trim() || undefined,
+          successCount: Math.max(0, normalizeAutomationNumeric(runStateRaw.successCount, 0)) || undefined
+        }
+      : undefined,
+    createdAt: Math.max(0, normalizeAutomationNumeric(source.createdAt, Date.now())),
+    updatedAt: Math.max(0, normalizeAutomationNumeric(source.updatedAt, Date.now()))
+  }
+}
+
+export async function getExportAutomationTasks(scopeKey: string): Promise<ExportAutomationTaskMapItem | null> {
+  if (!scopeKey) return null
+  const value = await config.get(CONFIG_KEYS.EXPORT_AUTOMATION_TASK_MAP)
+  if (!value || typeof value !== 'object') return null
+  const rawMap = value as Record<string, unknown>
+  const rawItem = rawMap[scopeKey]
+  if (!rawItem || typeof rawItem !== 'object') return null
+
+  const item = rawItem as Record<string, unknown>
+  const updatedAt = Number(item.updatedAt)
+  const rawTasks = Array.isArray(item.tasks)
+    ? item.tasks
+    : (Array.isArray(rawItem) ? rawItem : [])
+  const tasks: ExportAutomationTask[] = []
+  for (const rawTask of rawTasks) {
+    const normalized = normalizeAutomationTask(rawTask)
+    if (normalized) {
+      tasks.push(normalized)
+    }
+  }
+  return {
+    updatedAt: Number.isFinite(updatedAt) ? Math.max(0, Math.floor(updatedAt)) : 0,
+    tasks
+  }
+}
+
+export async function setExportAutomationTasks(scopeKey: string, tasks: ExportAutomationTask[]): Promise<void> {
+  if (!scopeKey) return
+  const current = await config.get(CONFIG_KEYS.EXPORT_AUTOMATION_TASK_MAP)
+  const map = current && typeof current === 'object'
+    ? { ...(current as Record<string, unknown>) }
+    : {}
+  map[scopeKey] = {
+    updatedAt: Date.now(),
+    tasks: (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...task }))
+  }
+  await config.set(CONFIG_KEYS.EXPORT_AUTOMATION_TASK_MAP, map)
+}
+
+export async function clearExportAutomationTasks(scopeKey: string): Promise<void> {
+  if (!scopeKey) return
+  const current = await config.get(CONFIG_KEYS.EXPORT_AUTOMATION_TASK_MAP)
+  if (!current || typeof current !== 'object') return
+  const map = { ...(current as Record<string, unknown>) }
+  if (!(scopeKey in map)) return
+  delete map[scopeKey]
+  await config.set(CONFIG_KEYS.EXPORT_AUTOMATION_TASK_MAP, map)
 }
 
 export interface ExportSessionMessageCountCacheItem {

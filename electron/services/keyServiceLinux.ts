@@ -3,6 +3,7 @@ import { join } from 'path'
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
+import crypto from 'crypto'
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
@@ -10,7 +11,7 @@ const execFileAsync = promisify(execFile)
 const execAsync = promisify(exec)
 
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
-type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; error?: string }
+type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
 
 export class KeyServiceLinux {
   private sudo: any
@@ -243,11 +244,47 @@ export class KeyServiceLinux {
       if (account && account.keys && account.keys.length > 0) {
         onProgress?.(`已找到匹配的图片密钥 (wxid: ${account.wxid})`);
         const keyObj = account.keys[0]
-        return { success: true, xorKey: keyObj.xorKey, aesKey: keyObj.aesKey }
+        const aesKey = String(keyObj.aesKey || '')
+        const verified = await this.verifyImageKeyByTemplate(accountPath, aesKey)
+        if (verified === true) {
+          onProgress?.('缓存密钥校验成功，已确认可用')
+        } else if (verified === false) {
+          onProgress?.('已从缓存计算密钥，但未通过本地模板校验')
+        }
+        return { success: true, xorKey: keyObj.xorKey, aesKey, verified: verified === true }
       }
       return { success: false, error: '未在缓存中找到匹配的图片密钥' }
     } catch (err: any) {
       return { success: false, error: err.message }
+    }
+  }
+
+  private async verifyImageKeyByTemplate(accountPath: string | undefined, aesKey: string): Promise<boolean | null> {
+    const normalizedPath = String(accountPath || '').trim()
+    if (!normalizedPath || !aesKey || aesKey.length < 16 || !existsSync(normalizedPath)) return null
+    try {
+      const template = await this._findTemplateData(normalizedPath, 32)
+      if (!template.ciphertext) return null
+      return this.verifyDerivedAesKey(aesKey, template.ciphertext)
+    } catch {
+      return null
+    }
+  }
+
+  private verifyDerivedAesKey(aesKey: string, ciphertext: Buffer): boolean {
+    try {
+      if (!aesKey || aesKey.length < 16 || ciphertext.length !== 16) return false
+      const decipher = crypto.createDecipheriv('aes-128-ecb', Buffer.from(aesKey, 'ascii').subarray(0, 16), null)
+      decipher.setAutoPadding(false)
+      const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+      if (dec[0] === 0xFF && dec[1] === 0xD8 && dec[2] === 0xFF) return true
+      if (dec[0] === 0x89 && dec[1] === 0x50 && dec[2] === 0x4E && dec[3] === 0x47) return true
+      if (dec[0] === 0x52 && dec[1] === 0x49 && dec[2] === 0x46 && dec[3] === 0x46) return true
+      if (dec[0] === 0x77 && dec[1] === 0x78 && dec[2] === 0x67 && dec[3] === 0x66) return true
+      if (dec[0] === 0x47 && dec[1] === 0x49 && dec[2] === 0x46) return true
+      return false
+    } catch {
+      return false
     }
   }
 

@@ -110,7 +110,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('window:respondCloseConfirm', action),
     openAgreementWindow: () => ipcRenderer.invoke('window:openAgreementWindow'),
     completeOnboarding: () => ipcRenderer.invoke('window:completeOnboarding'),
-    openOnboardingWindow: () => ipcRenderer.invoke('window:openOnboardingWindow'),
+    openOnboardingWindow: (options?: { mode?: 'add-account' }) => ipcRenderer.invoke('window:openOnboardingWindow', options),
     setTitleBarOverlay: (options: { symbolColor: string }) => ipcRenderer.send('window:setTitleBarOverlay', options),
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) =>
       ipcRenderer.invoke('window:openVideoPlayerWindow', videoPath, videoWidth, videoHeight),

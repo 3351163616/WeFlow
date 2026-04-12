@@ -7,7 +7,7 @@ import crypto from 'crypto'
 import { homedir } from 'os'
 
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
-type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; error?: string }
+type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
 const execFileAsync = promisify(execFile)
 
 export class KeyServiceMac {
@@ -647,7 +647,7 @@ export class KeyServiceMac {
               const { xorKey, aesKey } = this.deriveImageKeys(code, candidateWxid)
               if (!this.verifyDerivedAesKey(aesKey, template.ciphertext)) continue
               onStatus?.(`密钥获取成功 (wxid: ${candidateWxid}, code: ${code})`)
-              return { success: true, xorKey, aesKey }
+              return { success: true, xorKey, aesKey, verified: true }
             }
           }
         }
@@ -662,7 +662,7 @@ export class KeyServiceMac {
       const fallbackCode = codes[0]
       const { xorKey, aesKey } = this.deriveImageKeys(fallbackCode, fallbackWxid)
       onStatus?.(`密钥获取成功 (wxid: ${fallbackWxid}, code: ${fallbackCode})`)
-      return { success: true, xorKey, aesKey }
+      return { success: true, xorKey, aesKey, verified: false }
     } catch (e: any) {
       return { success: false, error: `自动获取图片密钥失败: ${e.message}` }
     }

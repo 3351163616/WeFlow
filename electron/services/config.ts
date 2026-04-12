@@ -71,6 +71,7 @@ interface ConfigSchema {
   quoteLayout: 'quote-top' | 'quote-bottom'
   wordCloudExcludeWords: string[]
   exportWriteLayout: 'A' | 'B' | 'C'
+  exportAutomationTaskMap: Record<string, unknown>
 
   // AI 见解
   aiModelApiBaseUrl: string
@@ -185,6 +186,7 @@ export class ConfigService {
       quoteLayout: 'quote-top',
       wordCloudExcludeWords: [],
       exportWriteLayout: 'A',
+      exportAutomationTaskMap: {},
       aiModelApiBaseUrl: '',
       aiModelApiKey: '',
       aiModelApiModel: 'gpt-4o-mini',

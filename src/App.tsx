@@ -26,6 +26,7 @@ import ContactsPage from './pages/ContactsPage'
 import ResourcesPage from './pages/ResourcesPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import NotificationWindow from './pages/NotificationWindow'
+import AccountManagementPage from './pages/AccountManagementPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
@@ -678,6 +679,7 @@ function App() {
             <Routes location={routeLocation}>
               <Route path="/" element={<HomePage />} />
               <Route path="/home" element={<HomePage />} />
+              <Route path="/account-management" element={<AccountManagementPage />} />
               <Route path="/chat" element={<ChatPage />} />
 
               <Route path="/analytics" element={<ChatAnalyticsHubPage />} />

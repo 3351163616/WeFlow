@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../stores/appStore'
 import { dialog } from '../services/ipc'
 import * as configService from '../services/config'
@@ -31,6 +31,7 @@ const steps = [
   { id: 'security', title: '安全防护', desc: '保护你的数据' }
 ]
 type SetupStepId = typeof steps[number]['id']
+type ImageKeyResolveSource = 'manual-cache' | 'prefetch-cache' | 'memory-scan'
 
 interface WelcomePageProps {
   standalone?: boolean
@@ -61,9 +62,44 @@ const isDbKeyReadyMessage = (message: string): boolean => (
   || message.includes('已准备就绪，现在登录微信或退出登录后重新登录微信')
 )
 
+const pickWxidByAnchorTime = (
+  wxids: Array<{ wxid: string; modifiedTime: number }>,
+  anchorTime?: number
+): string => {
+  if (!Array.isArray(wxids) || wxids.length === 0) return ''
+  const fallbackWxid = wxids[0]?.wxid || ''
+  if (!anchorTime || !Number.isFinite(anchorTime)) return fallbackWxid
+
+  const valid = wxids.filter(item => Number.isFinite(item.modifiedTime) && item.modifiedTime > 0)
+  if (valid.length === 0) return fallbackWxid
+
+  const anchor = Number(anchorTime)
+  const nearWindowMs = 10 * 60 * 1000
+
+  const near = valid
+    .filter(item => Math.abs(item.modifiedTime - anchor) <= nearWindowMs)
+    .sort((a, b) => {
+      const diffGap = Math.abs(a.modifiedTime - anchor) - Math.abs(b.modifiedTime - anchor)
+      if (diffGap !== 0) return diffGap
+      if (b.modifiedTime !== a.modifiedTime) return b.modifiedTime - a.modifiedTime
+      return a.wxid.localeCompare(b.wxid)
+    })
+  if (near.length > 0) return near[0].wxid
+
+  const closest = valid.sort((a, b) => {
+    const diffGap = Math.abs(a.modifiedTime - anchor) - Math.abs(b.modifiedTime - anchor)
+    if (diffGap !== 0) return diffGap
+    if (b.modifiedTime !== a.modifiedTime) return b.modifiedTime - a.modifiedTime
+    return a.wxid.localeCompare(b.wxid)
+  })
+  return closest[0]?.wxid || fallbackWxid
+}
+
 function WelcomePage({ standalone = false }: WelcomePageProps) {
   const navigate = useNavigate()
+  const location = useLocation()
   const { isDbConnected, setDbConnected, setLoading } = useAppStore()
+  const isAddAccountMode = standalone && new URLSearchParams(location.search).get('mode') === 'add-account'
 
   const [stepIndex, setStepIndex] = useState(0)
   const [dbPath, setDbPath] = useState('')
@@ -92,7 +128,11 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [isManualStartPrompt, setIsManualStartPrompt] = useState(false)
   const [imageKeyPercent, setImageKeyPercent] = useState<number | null>(null)
+  const [isImageKeyVerified, setIsImageKeyVerified] = useState(false)
+  const [isImageStepAutoCompleted, setIsImageStepAutoCompleted] = useState(false)
+  const [hasReacquiredDbKey, setHasReacquiredDbKey] = useState(!isAddAccountMode)
   const [showDbKeyConfirm, setShowDbKeyConfirm] = useState(false)
+  const imagePrefetchAttemptRef = useRef<string>('')
 
   // 安全相关 state
   const [enableAuth, setEnableAuth] = useState(false)
@@ -191,7 +231,79 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     setWxidOptions([])
     setWxid('')
     setShowWxidSelect(false)
-  }, [dbPath])
+    setIsImageKeyVerified(false)
+    setIsImageStepAutoCompleted(false)
+    if (isAddAccountMode) {
+      setHasReacquiredDbKey(false)
+      setDecryptKey('')
+    }
+    imagePrefetchAttemptRef.current = ''
+  }, [dbPath, isAddAccountMode])
+
+  useEffect(() => {
+    if (!isAddAccountMode) return
+    let cancelled = false
+
+    const hydrateAddAccountMode = async () => {
+      const keyStepIndex = steps.findIndex(step => step.id === 'key')
+      if (keyStepIndex >= 0) {
+        setStepIndex(keyStepIndex)
+      }
+
+      try {
+        const [
+          savedDbPath,
+          savedCachePath,
+          savedWxid,
+          savedImageXorKey,
+          savedImageAesKey
+        ] = await Promise.all([
+          configService.getDbPath(),
+          configService.getCachePath(),
+          configService.getMyWxid(),
+          configService.getImageXorKey(),
+          configService.getImageAesKey()
+        ])
+        if (cancelled) return
+
+        setDbPath(savedDbPath || '')
+        setCachePath(savedCachePath || '')
+        setDecryptKey('')
+        setHasReacquiredDbKey(false)
+        if (typeof savedImageXorKey === 'number' && Number.isFinite(savedImageXorKey)) {
+          setImageXorKey(`0x${savedImageXorKey.toString(16).toUpperCase().padStart(2, '0')}`)
+        }
+        setImageAesKey(savedImageAesKey || '')
+
+        if (savedDbPath) {
+          const scannedWxids = await window.electronAPI.dbPath.scanWxids(savedDbPath)
+          if (cancelled) return
+          setWxidOptions(scannedWxids)
+
+          const preferredWxid = String(savedWxid || '').trim()
+          const matched = scannedWxids.find(item => item.wxid === preferredWxid)
+          if (matched) {
+            setWxid(matched.wxid)
+          } else if (preferredWxid) {
+            setWxid(preferredWxid)
+          } else if (scannedWxids.length > 0) {
+            setWxid(scannedWxids[0].wxid)
+          }
+        } else if (savedWxid) {
+          setWxid(savedWxid)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(`加载当前账号配置失败: ${e}`)
+        }
+      }
+    }
+
+    void hydrateAddAccountMode()
+    return () => {
+      cancelled = true
+    }
+  }, [isAddAccountMode])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -206,9 +318,29 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showWxidSelect])
 
-  const currentStep = steps[stepIndex]
+  const imageStepIndex = steps.findIndex(step => step.id === 'image')
+  const securityStepIndex = steps.findIndex(step => step.id === 'security')
+  const currentStep = steps[stepIndex] ?? steps[0]
+  const imagePreCompletedAhead = isImageStepAutoCompleted && imageStepIndex >= 0 && stepIndex < imageStepIndex
   const rootClassName = `welcome-page${isClosing ? ' is-closing' : ''}${standalone ? ' is-standalone' : ''}`
   const showWindowControls = standalone
+
+  const isStepCompleted = (index: number, stepId: SetupStepId): boolean => {
+    if (index < stepIndex) return true
+    if (stepId === 'image' && isImageStepAutoCompleted) return true
+    if (isAddAccountMode && stepId !== 'key') return true
+    return false
+  }
+
+  const resolveStepDesc = (step: { id: SetupStepId; desc: string }): string => {
+    if (step.id === 'image' && isImageStepAutoCompleted) {
+      return '缓存校验成功，已自动完成'
+    }
+    if (isAddAccountMode && step.id !== 'key') {
+      return '已沿用当前配置'
+    }
+    return step.desc
+  }
 
   const handleMinimize = () => {
     window.electronAPI.window.minimize()
@@ -302,7 +434,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     }
   }
 
-  const handleScanWxid = async (silent = false) => {
+  const handleScanWxid = async (silent = false, anchorTime?: number) => {
     if (!dbPath) {
       if (!silent) setError('请先选择数据库目录')
       return
@@ -314,8 +446,10 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       const wxids = await window.electronAPI.dbPath.scanWxids(dbPath)
       setWxidOptions(wxids)
       if (wxids.length > 0) {
-        // scanWxids 已经按时间排过序了，直接取第一个
-        setWxid(wxids[0].wxid)
+        // 密钥成功后使用成功时刻作为锚点，自动选择最接近该时刻的活跃账号；
+        // 其余场景保持“时间最新”优先。
+        const selectedWxid = pickWxidByAnchorTime(wxids, anchorTime)
+        setWxid(selectedWxid || wxids[0].wxid)
         if (!silent) setError('')
       } else {
         if (!silent) setError('未检测到账号目录，请检查路径')
@@ -364,10 +498,15 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       const result = await window.electronAPI.key.autoGetDbKey()
       if (result.success && result.key) {
         setDecryptKey(result.key)
+        setHasReacquiredDbKey(true)
         setDbKeyStatus('密钥获取成功')
         setError('')
-        await handleScanWxid(true)
+        const keySuccessAt = Date.now()
+        await handleScanWxid(true, keySuccessAt)
       } else {
+        if (isAddAccountMode) {
+          setHasReacquiredDbKey(false)
+        }
         if (
           result.error?.includes('未找到微信安装路径') ||
           result.error?.includes('启动微信失败') ||
@@ -396,25 +535,45 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     handleAutoGetDbKey()
   }
 
-  const handleAutoGetImageKey = async () => {
+  const handleAutoGetImageKey = async (
+    source: ImageKeyResolveSource = 'manual-cache',
+    options?: { silentError?: boolean }
+  ) => {
     if (isFetchingImageKey) return
     if (!dbPath) { setError('请先选择数据库目录'); return }
     setIsFetchingImageKey(true)
-    setError('')
+    if (!options?.silentError) {
+      setError('')
+    }
     setImageKeyPercent(0)
-    setImageKeyStatus('正在准备获取图片密钥...')
+    setImageKeyStatus(source === 'prefetch-cache' ? '正在预计算图片密钥...' : '正在准备获取图片密钥...')
     try {
       const accountPath = wxid ? `${dbPath}/${wxid}` : dbPath
       const result = await window.electronAPI.key.autoGetImageKey(accountPath, wxid)
       if (result.success && result.aesKey) {
         if (typeof result.xorKey === 'number') setImageXorKey(`0x${result.xorKey.toString(16).toUpperCase().padStart(2, '0')}`)
         setImageAesKey(result.aesKey)
-        setImageKeyStatus('已获取图片密钥')
+        const verified = result.verified === true
+        setIsImageKeyVerified(verified)
+        setIsImageStepAutoCompleted(verified)
+        if (verified) {
+          setImageKeyStatus(source === 'prefetch-cache' ? '图片密钥已预先自动完成（缓存校验通过）' : '图片密钥获取成功（缓存校验通过）')
+        } else {
+          setImageKeyStatus('已自动计算图片密钥（未完成校验）')
+        }
       } else {
-        setError(result.error || '自动获取图片密钥失败')
+        setIsImageKeyVerified(false)
+        setIsImageStepAutoCompleted(false)
+        if (!options?.silentError) {
+          setError(result.error || '自动获取图片密钥失败')
+        }
       }
     } catch (e) {
-      setError(`自动获取图片密钥失败: ${e}`)
+      setIsImageKeyVerified(false)
+      setIsImageStepAutoCompleted(false)
+      if (!options?.silentError) {
+        setError(`自动获取图片密钥失败: ${e}`)
+      }
     } finally {
       setIsFetchingImageKey(false)
     }
@@ -433,6 +592,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       if (result.success && result.aesKey) {
         if (typeof result.xorKey === 'number') setImageXorKey(`0x${result.xorKey.toString(16).toUpperCase().padStart(2, '0')}`)
         setImageAesKey(result.aesKey)
+        setIsImageKeyVerified(false)
+        setIsImageStepAutoCompleted(false)
         setImageKeyStatus('内存扫描成功，已获取图片密钥')
       } else {
         setError(result.error || '内存扫描获取图片密钥失败')
@@ -443,6 +604,14 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       setIsFetchingImageKey(false)
     }
   }
+
+  useEffect(() => {
+    if (!dbPath || !wxid || decryptKey.length !== 64) return
+    const attemptKey = `${dbPath}::${wxid}::${decryptKey}`
+    if (imagePrefetchAttemptRef.current === attemptKey) return
+    imagePrefetchAttemptRef.current = attemptKey
+    void handleAutoGetImageKey('prefetch-cache', { silentError: true })
+  }, [dbPath, wxid, decryptKey])
 
   const jumpToStep = (stepId: SetupStepId) => {
     const targetIndex = steps.findIndex(step => step.id === stepId)
@@ -487,6 +656,10 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   }
 
   const canGoNext = () => {
+    if (isAddAccountMode) {
+      if (currentStep.id === 'key') return hasReacquiredDbKey && decryptKey.length === 64 && Boolean(wxid)
+      return true
+    }
     if (currentStep.id === 'intro') return true
     if (currentStep.id === 'db') return Boolean(dbPath) && !dbPathValidationError
     if (currentStep.id === 'cache') return true
@@ -502,6 +675,11 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   }
 
   const handleNext = async () => {
+    if (isAddAccountMode) {
+      await handleConnect()
+      return
+    }
+
     if (currentStep.id === 'db') {
       const dbStepIssue = await validateDbStepBeforeNext()
       if (dbStepIssue) {
@@ -520,15 +698,25 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       return
     }
     setError('')
+    if (currentStep.id === 'key' && isImageStepAutoCompleted && securityStepIndex >= 0) {
+      setStepIndex(securityStepIndex)
+      return
+    }
     setStepIndex((prev) => Math.min(prev + 1, steps.length - 1))
   }
 
   const handleBack = () => {
+    if (isAddAccountMode) return
     setError('')
     setStepIndex((prev) => Math.max(prev - 1, 0))
   }
 
   const handleConnect = async () => {
+    if (isAddAccountMode && !hasReacquiredDbKey) {
+      setError('请先在当前流程中自动获取一次数据库密钥')
+      return
+    }
+
     const configIssue = await findConfigIssueBeforeConnect()
     if (configIssue) {
       setError(configIssue.message)
@@ -708,13 +896,16 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
 
           <div className="sidebar-nav">
             {steps.map((step, index) => (
-              <div key={step.id} className={`nav-item ${index === stepIndex ? 'active' : ''} ${index < stepIndex ? 'completed' : ''}`}>
+              <div key={step.id} className={`nav-item ${index === stepIndex ? 'active' : ''} ${isStepCompleted(index, step.id) ? 'completed' : ''}`}>
                 <div className="nav-indicator">
-                  {index < stepIndex ? <CheckCircle2 size={14} /> : <div className="dot" />}
+                  {isStepCompleted(index, step.id) ? <CheckCircle2 size={14} /> : <div className="dot" />}
                 </div>
                 <div className="nav-info">
                   <div className="nav-title">{step.title}</div>
-                  <div className="nav-desc">{step.desc}</div>
+                  <div className="nav-desc">{resolveStepDesc(step)}</div>
+                  {step.id === 'image' && imagePreCompletedAhead && (
+                    <div className="nav-hint">已预先自动完成</div>
+                  )}
                 </div>
               </div>
             ))}
@@ -731,6 +922,9 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
             <div>
               <h2>{currentStep.title}</h2>
               <p className="header-desc">{currentStep.desc}</p>
+              {isAddAccountMode && (
+                <p className="header-mode-tip">添加账号模式：其他步骤已沿用当前配置，只需重新获取数据库密钥。</p>
+              )}
             </div>
           </div>
 
@@ -863,6 +1057,9 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                 </div>
 
                 {dbKeyStatus && <div className={`status-message ${isDbKeyReadyMessage(dbKeyStatus) ? 'is-success' : ''}`}>{dbKeyStatus}</div>}
+                {isAddAccountMode && !hasReacquiredDbKey && (
+                  <div className="field-hint">添加账号模式下需先自动获取一次数据库密钥，才能完成并返回主窗口。</div>
+                )}
               </div>
             )}
 
@@ -936,19 +1133,19 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
 
             {currentStep.id === 'image' && (
               <div className="form-group">
-                <div className="grid-2">
-                  <div>
-                    <label className="field-label">图片 XOR 密钥</label>
-                    <input type="text" className="field-input" placeholder="0x..." value={imageXorKey} onChange={(e) => setImageXorKey(e.target.value)} />
+                <div className="auto-image-key-preview">
+                  <div className="auto-image-key-row">
+                    <span className="auto-image-key-label">图片 XOR 密钥</span>
+                    <code>{imageXorKey || '等待自动计算'}</code>
                   </div>
-                  <div>
-                    <label className="field-label">图片 AES 密钥</label>
-                    <input type="text" className="field-input" placeholder="16位密钥" value={imageAesKey} onChange={(e) => setImageAesKey(e.target.value)} />
+                  <div className="auto-image-key-row">
+                    <span className="auto-image-key-label">图片 AES 密钥</span>
+                    <code>{imageAesKey || '等待自动计算'}</code>
                   </div>
                 </div>
 
                 <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
-                  <button className="btn btn-primary btn-block" onClick={handleAutoGetImageKey} disabled={isFetchingImageKey} title="从本地缓存快速计算">
+                  <button className="btn btn-primary btn-block" onClick={() => handleAutoGetImageKey('manual-cache')} disabled={isFetchingImageKey} title="从本地缓存快速计算">
                     {isFetchingImageKey ? '获取中...' : '缓存计算（推荐）'}
                   </button>
                   <button className="btn btn-secondary btn-block" onClick={handleScanImageKeyFromMemory} disabled={isFetchingImageKey} title="扫描微信进程内存">
@@ -960,13 +1157,23 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                   <div className="brute-force-progress">
                     <div className="status-header">
                       <span className="status-text">{imageKeyStatus || '正在启动...'}</span>
+                      {typeof imageKeyPercent === 'number' && Number.isFinite(imageKeyPercent) && (
+                        <span className="status-text">{Math.max(0, Math.min(100, imageKeyPercent)).toFixed(1)}%</span>
+                      )}
                     </div>
                   </div>
                 ) : (
                   imageKeyStatus && <div className="status-message" style={{ marginTop: '12px' }}>{imageKeyStatus}</div>
                 )}
 
-                <div className="field-hint" style={{ marginTop: '8px' }}>优先推荐缓存计算方案。若图片无法解密，可使用内存扫描（需微信运行并打开 2-3 张图片大图）</div>
+                <div className="field-hint" style={{ marginTop: '8px' }}>
+                  图片密钥已改为自动计算。仅当“缓存计算 + 本地校验通过”时会自动跳过本步骤；若失败可使用内存扫描兜底。
+                </div>
+                {isImageKeyVerified && (
+                  <div className="status-message is-success" style={{ marginTop: '8px' }}>
+                    当前密钥已通过缓存校验，可安全自动跳过图片密钥步骤。
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -981,11 +1188,15 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
           )}
 
           <div className="content-actions">
-            <button className="btn btn-ghost" onClick={handleBack} disabled={stepIndex === 0}>
+            <button className="btn btn-ghost" onClick={handleBack} disabled={stepIndex === 0 || isAddAccountMode}>
               <ArrowLeft size={16} /> 上一步
             </button>
 
-            {stepIndex < steps.length - 1 ? (
+            {isAddAccountMode ? (
+              <button className="btn btn-primary" onClick={handleConnect} disabled={isConnecting || !canGoNext()}>
+                {isConnecting ? '连接中...' : '完成并返回'} <ArrowRight size={16} />
+              </button>
+            ) : stepIndex < steps.length - 1 ? (
               <button className="btn btn-primary" onClick={handleNext} disabled={!canGoNext()}>
                 下一步 <ArrowRight size={16} />
               </button>

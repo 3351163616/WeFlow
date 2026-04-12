@@ -950,8 +950,17 @@ function closeSplash() {
 /**
  * 创建首次引导窗口
  */
-function createOnboardingWindow() {
+function createOnboardingWindow(mode: 'default' | 'add-account' = 'default') {
+  const onboardingHash = mode === 'add-account'
+    ? '/onboarding-window?mode=add-account'
+    : '/onboarding-window'
+
   if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+    if (process.env.VITE_DEV_SERVER_URL) {
+      onboardingWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#${onboardingHash}`)
+    } else {
+      onboardingWindow.loadFile(join(__dirname, '../dist/index.html'), { hash: onboardingHash })
+    }
     onboardingWindow.focus()
     return onboardingWindow
   }
@@ -987,9 +996,9 @@ function createOnboardingWindow() {
   })
 
   if (process.env.VITE_DEV_SERVER_URL) {
-    onboardingWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#/onboarding-window`)
+    onboardingWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}#${onboardingHash}`)
   } else {
-    onboardingWindow.loadFile(join(__dirname, '../dist/index.html'), { hash: '/onboarding-window' })
+    onboardingWindow.loadFile(join(__dirname, '../dist/index.html'), { hash: onboardingHash })
   }
 
   onboardingWindow.on('closed', () => {
@@ -2260,6 +2269,39 @@ function registerIpcHandlers() {
         const defaultValue = key === 'lastSession' ? '' : {}
         cfg.set(key as any, defaultValue as any)
       }
+
+      try {
+        const dbPath = String(cfg.get('dbPath') || '').trim()
+        const automationMapRaw = cfg.get('exportAutomationTaskMap') as Record<string, unknown> | undefined
+        if (automationMapRaw && typeof automationMapRaw === 'object') {
+          const nextAutomationMap: Record<string, unknown> = { ...automationMapRaw }
+          let changed = false
+          for (const scopeKey of Object.keys(automationMapRaw)) {
+            const normalizedScopeKey = String(scopeKey || '').trim()
+            if (!normalizedScopeKey) continue
+            const separatorIndex = normalizedScopeKey.lastIndexOf('::')
+            const scopedDbPath = separatorIndex >= 0
+              ? normalizedScopeKey.slice(0, separatorIndex)
+              : ''
+            const scopedWxidRaw = separatorIndex >= 0
+              ? normalizedScopeKey.slice(separatorIndex + 2)
+              : normalizedScopeKey
+            const scopedWxid = normalizeAccountId(scopedWxidRaw)
+            const wxidMatched = wxidCandidates.includes(scopedWxidRaw) || scopedWxid === normalizedWxid
+            const dbPathMatched = !dbPath || !scopedDbPath || scopedDbPath === dbPath
+            if (!wxidMatched || !dbPathMatched) continue
+            delete nextAutomationMap[scopeKey]
+            changed = true
+          }
+          if (changed) {
+            cfg.set('exportAutomationTaskMap' as any, nextAutomationMap as any)
+          } else if (!Object.keys(automationMapRaw).length) {
+            cfg.set('exportAutomationTaskMap' as any, {} as any)
+          }
+        }
+      } catch (error) {
+        warnings.push(`清理自动化导出任务失败: ${String(error)}`)
+      }
     }
 
     if (clearCache) {
@@ -3019,12 +3061,13 @@ function registerIpcHandlers() {
   })
 
   // 重新打开首次引导窗口，并隐藏主窗口
-  ipcMain.handle('window:openOnboardingWindow', async () => {
+  ipcMain.handle('window:openOnboardingWindow', async (_, options?: { mode?: 'add-account' }) => {
     shouldShowMain = false
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.hide()
     }
-    createOnboardingWindow()
+    const mode = options?.mode === 'add-account' ? 'add-account' : 'default'
+    createOnboardingWindow(mode)
     return true
   })
 

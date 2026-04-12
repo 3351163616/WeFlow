@@ -18,7 +18,7 @@ export interface ElectronAPI {
     respondCloseConfirm: (action: 'tray' | 'quit' | 'cancel') => Promise<boolean>
     openAgreementWindow: () => Promise<boolean>
     completeOnboarding: () => Promise<boolean>
-    openOnboardingWindow: () => Promise<boolean>
+    openOnboardingWindow: (options?: { mode?: 'add-account' }) => Promise<boolean>
     setTitleBarOverlay: (options: { symbolColor: string }) => void
     openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) => Promise<void>
     resizeToFitVideo: (videoWidth: number, videoHeight: number) => Promise<void>
@@ -146,7 +146,7 @@ export interface ElectronAPI {
   }
   key: {
     autoGetDbKey: () => Promise<{ success: boolean; key?: string; error?: string; logs?: string[] }>
-    autoGetImageKey: (manualDir?: string, wxid?: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; error?: string }>
+    autoGetImageKey: (manualDir?: string, wxid?: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }>
     scanImageKeyFromMemory: (userDir: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; error?: string }>
     onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => () => void
     onImageKeyStatus: (callback: (payload: { message: string }) => void) => () => void
