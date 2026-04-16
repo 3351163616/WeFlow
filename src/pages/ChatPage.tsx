@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper, Sparkles } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
@@ -6595,6 +6595,16 @@ function ChatPage(props: ChatPageProps) {
                     title="查看对方朋友圈"
                   >
                     <Aperture size={18} />
+                  </button>
+                )}
+                {!standaloneSessionWindow && (
+                  <button
+                    className="icon-btn"
+                    onClick={() => navigate('/character-prompt', { state: { sessionId: currentSessionId } })}
+                    disabled={!currentSessionId}
+                    title="生成角色提示词"
+                  >
+                    <Sparkles size={18} />
                   </button>
                 )}
                 {!standaloneSessionWindow && (

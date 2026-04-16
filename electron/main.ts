@@ -32,6 +32,8 @@ import { httpService } from './services/httpService'
 import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
 import { bizService } from './services/bizService'
+import { characterPromptService } from './services/characterPromptService'
+import { characterPromptRedeemService } from './services/characterPromptRedeemService'
 
 // 配置自动更新
 autoUpdater.autoDownload = false
@@ -1658,6 +1660,31 @@ function registerIpcHandlers() {
     mentionGroups?: Array<{ displayName?: string; session_id?: string; count?: number }>
   }) => {
     return insightService.generateFootprintInsight(payload)
+  })
+
+  // 角色提示词
+  ipcMain.handle('characterPrompt:getMembers', async (_, sessionId: string) => {
+    return characterPromptService.getSessionMembers(sessionId)
+  })
+  ipcMain.handle('characterPrompt:generate', async (_, params) => {
+    return characterPromptService.generate(params)
+  })
+  ipcMain.handle('characterPrompt:stop', async (_, taskId: string) => {
+    return characterPromptService.stop(taskId)
+  })
+  ipcMain.handle('characterPrompt:saveFile', async (_, filePath: string, content: string) => {
+    try {
+      await writeFile(filePath, content, 'utf-8')
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: (e as Error).message }
+    }
+  })
+  ipcMain.handle('characterPrompt:redeemCode', async (_, code: string) => {
+    return characterPromptRedeemService.redeemCode(code)
+  })
+  ipcMain.handle('characterPrompt:getRemainingUses', async () => {
+    return { remaining: characterPromptRedeemService.getRemainingUses() }
   })
 
   ipcMain.handle('config:clear', async () => {
@@ -3591,6 +3618,8 @@ app.whenReady().then(async () => {
   // 注册 IPC 处理器
   updateSplashProgress(28, '正在初始化...')
   registerIpcHandlers()
+  characterPromptService.setConfig(configService)
+  characterPromptRedeemService.setConfig(configService)
   chatService.addDbMonitorListener((type, json) => {
     messagePushService.handleDbMonitorChange(type, json)
     insightService.handleDbMonitorChange(type, json)

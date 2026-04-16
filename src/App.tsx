@@ -27,6 +27,7 @@ import ResourcesPage from './pages/ResourcesPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import NotificationWindow from './pages/NotificationWindow'
 import AccountManagementPage from './pages/AccountManagementPage'
+import CharacterPromptPage from './pages/CharacterPromptPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
@@ -692,6 +693,7 @@ function App() {
               <Route path="/annual-report/view" element={<AnnualReportWindow />} />
               <Route path="/dual-report" element={<DualReportPage />} />
               <Route path="/dual-report/view" element={<DualReportWindow />} />
+              <Route path="/character-prompt" element={<CharacterPromptPage />} />
               <Route path="/footprint" element={<MyFootprintPage />} />
 
               <Route path="/export" element={<div className="export-route-anchor" aria-hidden="true" />} />

@@ -1093,6 +1093,38 @@ export interface ElectronAPI {
       mentionGroups?: Array<{ displayName?: string; session_id?: string; count?: number }>
     }) => Promise<{ success: boolean; message: string; insight?: string }>
   }
+  characterPrompt: {
+    getMembers: (sessionId: string) => Promise<{
+      success: boolean
+      members?: Array<{
+        wxid: string
+        displayName: string
+        messageCount: number
+      }>
+      sessionType?: 'private' | 'group'
+      sessionDisplayName?: string
+      error?: string
+    }>
+    generate: (params: {
+      sessionId: string
+      targetWxids: string[]
+      sessionGap?: number
+      apiProvider: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    stop: (taskId: string) => Promise<{ success: boolean }>
+    saveFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+    redeemCode: (code: string) => Promise<{ success: boolean; addedUses?: number; totalRemaining?: number; error?: string }>
+    getRemainingUses: () => Promise<{ remaining: number }>
+    onProgress: (callback: (payload: { taskId: string; phase: string; message: string; targetName?: string }) => void) => () => void
+    onChunk: (callback: (payload: { taskId: string; targetName: string; chunk: string }) => void) => () => void
+    onComplete: (callback: (payload: { taskId: string; targetName: string; fullText: string }) => void) => () => void
+    onError: (callback: (payload: { taskId: string; targetName?: string; error: string }) => void) => () => void
+    onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => () => void
+  }
 }
 
 export interface ExportOptions {

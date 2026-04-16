@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users } from 'lucide-react'
+import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users, Sparkles } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import * as configService from '../services/config'
 import { onExportSessionStatus, requestExportSessionStatus } from '../services/exportBridge'
@@ -382,6 +382,16 @@ function Sidebar({ collapsed }: SidebarProps) {
           >
             <span className="nav-icon"><FileText size={20} /></span>
             <span className="nav-label">年度报告</span>
+          </NavLink>
+
+          {/* 角色提示词 */}
+          <NavLink
+            to="/character-prompt"
+            className={`nav-item ${isActive('/character-prompt') ? 'active' : ''}`}
+            title={collapsed ? '角色提示词' : undefined}
+          >
+            <span className="nav-icon"><Sparkles size={20} /></span>
+            <span className="nav-label">角色提示词</span>
           </NavLink>
 
           {/* 我的足迹 */}

@@ -540,5 +540,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
       privateSegments?: Array<{ displayName?: string; session_id?: string; incoming_count?: number; outgoing_count?: number; message_count?: number; replied?: boolean }>
       mentionGroups?: Array<{ displayName?: string; session_id?: string; count?: number }>
     }) => ipcRenderer.invoke('insight:generateFootprintInsight', payload)
+  },
+
+  // 角色提示词
+  characterPrompt: {
+    getMembers: (sessionId: string) =>
+      ipcRenderer.invoke('characterPrompt:getMembers', sessionId),
+    generate: (params: {
+      sessionId: string
+      targetWxids: string[]
+      sessionGap?: number
+      apiProvider: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => ipcRenderer.invoke('characterPrompt:generate', params),
+    stop: (taskId: string) =>
+      ipcRenderer.invoke('characterPrompt:stop', taskId),
+    saveFile: (filePath: string, content: string) =>
+      ipcRenderer.invoke('characterPrompt:saveFile', filePath, content),
+    redeemCode: (code: string) =>
+      ipcRenderer.invoke('characterPrompt:redeemCode', code),
+    getRemainingUses: () =>
+      ipcRenderer.invoke('characterPrompt:getRemainingUses'),
+    onProgress: (callback: (payload: { taskId: string; phase: string; message: string; targetName?: string }) => void) => {
+      ipcRenderer.on('characterPrompt:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterPrompt:progress')
+    },
+    onChunk: (callback: (payload: { taskId: string; targetName: string; chunk: string }) => void) => {
+      ipcRenderer.on('characterPrompt:chunk', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterPrompt:chunk')
+    },
+    onComplete: (callback: (payload: { taskId: string; targetName: string; fullText: string }) => void) => {
+      ipcRenderer.on('characterPrompt:complete', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterPrompt:complete')
+    },
+    onError: (callback: (payload: { taskId: string; targetName?: string; error: string }) => void) => {
+      ipcRenderer.on('characterPrompt:error', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterPrompt:error')
+    },
+    onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => {
+      ipcRenderer.on('characterPrompt:usesUpdated', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterPrompt:usesUpdated')
+    }
   }
 })
