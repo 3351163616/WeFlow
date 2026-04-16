@@ -193,8 +193,15 @@ function formatMessages(
       const content = formatMessageContent(msg)
       if (content === null) continue
 
-      const senderName = msg.senderDisplayName || ''
-      const tag = nameToTag[senderName]
+      let tag: string | undefined
+      if (sessionType === 'private') {
+        // 私聊：直接按 isSend 映射，避免 senderDisplayName 为空导致丢消息
+        tag = msg.isSend === 1 ? 'A' : 'B'
+      } else {
+        // 群聊：按名字查表
+        const senderName = msg.senderDisplayName || ''
+        tag = nameToTag[senderName]
+      }
       if (!tag) continue
 
       if (tag !== lastTag) {
