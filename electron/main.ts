@@ -33,6 +33,7 @@ import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
 import { bizService } from './services/bizService'
 import { characterPromptService } from './services/characterPromptService'
+import { annualReportAiService } from './services/annualReportAiService'
 import { characterPromptRedeemService } from './services/characterPromptRedeemService'
 
 // 配置自动更新
@@ -1685,6 +1686,20 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('characterPrompt:getRemainingUses', async () => {
     return { remaining: characterPromptRedeemService.getRemainingUses() }
+  })
+
+  // 年度报告 AI 叙事 / 标题
+  ipcMain.handle('annualReportAi:generateNarration', async (_, params) => {
+    return annualReportAiService.generateNarration(params)
+  })
+  ipcMain.handle('annualReportAi:generateTitle', async (_, params) => {
+    return annualReportAiService.generateTitle(params)
+  })
+  ipcMain.handle('annualReportAi:stop', async (_, taskId: string) => {
+    return annualReportAiService.stop(taskId)
+  })
+  ipcMain.handle('annualReportAi:getRemainingUses', async () => {
+    return annualReportAiService.getRemainingUses()
   })
 
   ipcMain.handle('config:clear', async () => {
@@ -3619,6 +3634,7 @@ app.whenReady().then(async () => {
   updateSplashProgress(28, '正在初始化...')
   registerIpcHandlers()
   characterPromptService.setConfig(configService)
+  annualReportAiService.setConfig(configService)
   characterPromptRedeemService.setConfig(configService)
   chatService.addDbMonitorListener((type, json) => {
     messagePushService.handleDbMonitorChange(type, json)

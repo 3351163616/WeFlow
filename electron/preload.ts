@@ -584,5 +584,35 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('characterPrompt:usesUpdated', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('characterPrompt:usesUpdated')
     }
+  },
+  annualReportAi: {
+    generateNarration: (params: unknown) =>
+      ipcRenderer.invoke('annualReportAi:generateNarration', params),
+    generateTitle: (params: unknown) =>
+      ipcRenderer.invoke('annualReportAi:generateTitle', params),
+    stop: (taskId: string) =>
+      ipcRenderer.invoke('annualReportAi:stop', taskId),
+    getRemainingUses: () =>
+      ipcRenderer.invoke('annualReportAi:getRemainingUses'),
+    onProgress: (callback: (payload: { taskId: string; message: string }) => void) => {
+      ipcRenderer.on('annualReportAi:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('annualReportAi:progress')
+    },
+    onChunk: (callback: (payload: { taskId: string; chunk: string }) => void) => {
+      ipcRenderer.on('annualReportAi:chunk', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('annualReportAi:chunk')
+    },
+    onComplete: (callback: (payload: { taskId: string; fullText: string }) => void) => {
+      ipcRenderer.on('annualReportAi:complete', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('annualReportAi:complete')
+    },
+    onError: (callback: (payload: { taskId: string; error: string }) => void) => {
+      ipcRenderer.on('annualReportAi:error', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('annualReportAi:error')
+    },
+    onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => {
+      ipcRenderer.on('annualReportAi:usesUpdated', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('annualReportAi:usesUpdated')
+    }
   }
 })

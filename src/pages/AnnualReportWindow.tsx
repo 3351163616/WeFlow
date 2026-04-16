@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, Download, Image, Check, X, SlidersHorizontal } from 'lucide-react'
+import { Loader2, Download, Image, Check, X, SlidersHorizontal, Sparkles, Square } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import html2canvas from 'html2canvas'
 import { useThemeStore } from '../stores/themeStore'
 import {
@@ -95,6 +97,41 @@ function AnnualReportWindow() {
   const [loadingProgress, setLoadingProgress] = useState(0)
   const [loadingStage, setLoadingStage] = useState('正在初始化...')
   const [exportMode, setExportMode] = useState<'separate' | 'long'>('separate')
+
+  // AI 叙事 / 标题
+  const [aiNarration, setAiNarration] = useState('')
+  const [aiTitle, setAiTitle] = useState<{ title: string; subtitle: string } | null>(null)
+  const [aiGenerating, setAiGenerating] = useState(false)
+  const [aiTaskId, setAiTaskId] = useState('')
+  const [aiProgress, setAiProgress] = useState('')
+  const [aiError, setAiError] = useState('')
+  const [aiMode, setAiMode] = useState<'self' | 'redeem'>(
+    () => (typeof window !== 'undefined' && (localStorage.getItem('ar_ai_mode') as 'self' | 'redeem')) || 'redeem'
+  )
+  const [aiRemaining, setAiRemaining] = useState(0)
+  const [aiShowPanel, setAiShowPanel] = useState(false)
+  const aiNarrationRef = useRef('')
+
+  useEffect(() => { try { localStorage.setItem('ar_ai_mode', aiMode) } catch { /* ignore */ } }, [aiMode])
+
+  useEffect(() => {
+    window.electronAPI.annualReportAi.getRemainingUses().then(r => setAiRemaining(r.remaining))
+    const offProg = window.electronAPI.annualReportAi.onProgress((p) => setAiProgress(p.message))
+    const offChunk = window.electronAPI.annualReportAi.onChunk((p) => {
+      aiNarrationRef.current += p.chunk
+      setAiNarration(aiNarrationRef.current)
+    })
+    const offComp = window.electronAPI.annualReportAi.onComplete(() => {
+      setAiGenerating(false)
+      setAiProgress('叙事已生成')
+    })
+    const offErr = window.electronAPI.annualReportAi.onError((p) => {
+      setAiGenerating(false)
+      setAiError(p.error)
+    })
+    const offUses = window.electronAPI.annualReportAi.onUsesUpdated((p) => setAiRemaining(p.remaining))
+    return () => { offProg(); offChunk(); offComp(); offErr(); offUses() }
+  }, [])
 
   const { currentTheme, themeMode } = useThemeStore()
 
@@ -580,6 +617,57 @@ function AnnualReportWindow() {
     }
   }
 
+  const handleAiGenerate = async () => {
+    if (!reportData) return
+    setAiError('')
+    setAiNarration('')
+    aiNarrationRef.current = ''
+    setAiTitle(null)
+    setAiProgress('正在启动...')
+    setAiGenerating(true)
+
+    const baseParams: {
+      reportData: AnnualReportData
+      useBuiltinApi?: boolean
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      apiProvider?: 'openai' | 'anthropic'
+    } = { reportData }
+    if (aiMode === 'redeem') {
+      baseParams.useBuiltinApi = true
+    } else {
+      baseParams.apiBaseUrl = localStorage.getItem('cp_api_url') || ''
+      baseParams.apiKey = localStorage.getItem('cp_api_key') || ''
+      baseParams.apiModel = localStorage.getItem('cp_api_model') || ''
+      baseParams.apiProvider = (localStorage.getItem('cp_api_provider') as 'openai' | 'anthropic') || 'openai'
+      if (!baseParams.apiBaseUrl || !baseParams.apiKey) {
+        setAiError('请先在"角色提示词"页面填写自备 API 配置（地址/Key），本功能复用该配置')
+        setAiGenerating(false)
+        return
+      }
+    }
+
+    // 并行：叙事流式 + 标题单次
+    window.electronAPI.annualReportAi.generateTitle(baseParams).then(r => {
+      if (r.success && r.title) setAiTitle({ title: r.title, subtitle: r.subtitle || '' })
+    })
+    const startResult = await window.electronAPI.annualReportAi.generateNarration(baseParams)
+    if (startResult.success && startResult.taskId) {
+      setAiTaskId(startResult.taskId)
+      setAiShowPanel(true)
+    } else {
+      setAiError(startResult.error || '启动失败')
+      setAiGenerating(false)
+    }
+  }
+
+  const handleAiStop = () => {
+    if (aiTaskId) window.electronAPI.annualReportAi.stop(aiTaskId)
+    setAiGenerating(false)
+    setAiProgress('已取消')
+  }
+
   if (isLoading) {
     return (
       <div className="annual-report-window loading">
@@ -714,9 +802,86 @@ function AnnualReportWindow() {
           {/* 封面 */}
           <section className="section" ref={sectionRefs.cover}>
             <div className="label-text">WEFLOW · ANNUAL REPORT</div>
-            <h1 className="hero-title">{yearTitle}<br />微信聊天报告</h1>
-            <hr className="divider" />
-            <p className="hero-desc">每一条消息背后<br />都藏着一段独特的故事</p>
+            {aiTitle?.title ? (
+              <>
+                <h1 className="hero-title ai-title">{aiTitle.title}</h1>
+                {aiTitle.subtitle && <p className="ai-subtitle">{aiTitle.subtitle}</p>}
+                <hr className="divider" />
+                <p className="hero-desc" style={{ opacity: 0.75 }}>{yearTitle} 微信聊天报告</p>
+              </>
+            ) : (
+              <>
+                <h1 className="hero-title">{yearTitle}<br />微信聊天报告</h1>
+                <hr className="divider" />
+                <p className="hero-desc">每一条消息背后<br />都藏着一段独特的故事</p>
+              </>
+            )}
+          </section>
+
+          {/* AI 深度叙事 */}
+          <section className="section ai-narration-section">
+            <div className="label-text"><Sparkles size={12} style={{ verticalAlign: -1, marginRight: 4 }} />AI 深度叙事</div>
+            {!aiShowPanel && !aiNarration ? (
+              <div className="ai-cta-card">
+                <h2 className="hero-title" style={{ fontSize: 32 }}>让 AI 为你讲述这一年</h2>
+                <p className="hero-desc" style={{ maxWidth: 520, margin: '12px auto' }}>
+                  基于上面的统计数据，AI 将为你生成一份诗意、温暖、具体的年度叙事
+                </p>
+                <div className="ai-mode-switch">
+                  <button
+                    type="button"
+                    className={`ai-mode-btn ${aiMode === 'redeem' ? 'active' : ''}`}
+                    onClick={() => setAiMode('redeem')}
+                    disabled={aiGenerating}
+                  >兑换码（剩余 {aiRemaining} 次）</button>
+                  <button
+                    type="button"
+                    className={`ai-mode-btn ${aiMode === 'self' ? 'active' : ''}`}
+                    onClick={() => setAiMode('self')}
+                    disabled={aiGenerating}
+                  >自备 API</button>
+                </div>
+                <button
+                  className="ai-generate-btn"
+                  onClick={handleAiGenerate}
+                  disabled={aiGenerating || (aiMode === 'redeem' && aiRemaining <= 0)}
+                >
+                  <Sparkles size={18} />
+                  {aiGenerating ? '生成中...' : '生成 AI 叙事'}
+                </button>
+                {aiError && (
+                  <details className="ai-error">
+                    <summary>生成失败，点击展开详情</summary>
+                    <pre>{aiError}</pre>
+                  </details>
+                )}
+              </div>
+            ) : (
+              <div className="ai-narration-content">
+                {aiGenerating && (
+                  <div className="ai-progress-row">
+                    <Loader2 size={14} className="spin" />
+                    <span>{aiProgress}</span>
+                    <button className="ai-stop-btn" onClick={handleAiStop}>
+                      <Square size={12} />停止
+                    </button>
+                  </div>
+                )}
+                {aiNarration ? (
+                  <div className="ai-markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{aiNarration}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="hero-desc">正在等待 AI 响应...</p>
+                )}
+                {aiError && (
+                  <details className="ai-error">
+                    <summary>生成失败，点击展开详情</summary>
+                    <pre>{aiError}</pre>
+                  </details>
+                )}
+              </div>
+            )}
           </section>
 
           {/* 年度概览 */}
