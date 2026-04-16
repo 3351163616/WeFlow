@@ -35,6 +35,7 @@ import { bizService } from './services/bizService'
 import { characterPromptService } from './services/characterPromptService'
 import { annualReportAiService } from './services/annualReportAiService'
 import { analyticsAiService } from './services/analyticsAiService'
+import { testAiConnection } from './services/aiStreamService'
 import { characterPromptRedeemService } from './services/characterPromptRedeemService'
 
 // 配置自动更新
@@ -1716,7 +1717,6 @@ function registerIpcHandlers() {
 
   // AI 连接性测试（不消耗兑换码）
   ipcMain.handle('ai:testConnection', async (_, config: { provider: 'openai' | 'anthropic'; apiBaseUrl: string; apiKey: string; model: string }) => {
-    const { testAiConnection } = await import('./services/aiStreamService')
     return testAiConnection(config)
   })
 

@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback, KeyboardEvent } from 'react'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
-import { Search, ChevronDown, X, Check, Users, User } from 'lucide-react'
+import { Search, ChevronDown, X, Check, Users, User, MessagesSquare, ArrowUp, Clock, Hash } from 'lucide-react'
 import { Avatar } from './Avatar'
+import { getPinyinInitials } from '../utils/pinyinInitials'
 import './SessionPicker.scss'
 
 export interface SessionPickerOption {
@@ -10,7 +11,12 @@ export interface SessionPickerOption {
   avatarUrl?: string
   lastTimestamp?: number
   messageCount?: number
+  alias?: string       // 微信号（wxid 之外的 alias/微信号）
+  isPinned?: boolean   // 置顶（若数据源无则忽略）
 }
+
+type TypeFilter = 'all' | 'private' | 'group'
+type SortKey = 'recent' | 'count' | 'name'
 
 interface SessionPickerProps {
   sessions: SessionPickerOption[]
@@ -18,6 +24,8 @@ interface SessionPickerProps {
   onChange: (username: string) => void
   disabled?: boolean
   placeholder?: string
+  /** 允许隐藏类型 Tab（父级已做过滤时） */
+  hideTypeFilter?: boolean
 }
 
 function formatRelativeTime(ts?: number): string {
@@ -34,31 +42,104 @@ function formatRelativeTime(ts?: number): string {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
 
+/** 高亮关键词片段 */
+function Highlight({ text, keyword }: { text: string; keyword: string }) {
+  if (!keyword) return <>{text}</>
+  const lowerText = text.toLowerCase()
+  const lowerKw = keyword.toLowerCase()
+  const idx = lowerText.indexOf(lowerKw)
+  if (idx < 0) return <>{text}</>
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="sp-hl">{text.slice(idx, idx + keyword.length)}</mark>
+      {text.slice(idx + keyword.length)}
+    </>
+  )
+}
+
 export function SessionPicker({
-  sessions, value, onChange, disabled, placeholder = '选择会话...'
+  sessions, value, onChange, disabled, placeholder = '选择会话...', hideTypeFilter
 }: SessionPickerProps) {
   const [open, setOpen] = useState(false)
-  const [keyword, setKeyword] = useState('')
+  const [rawKeyword, setRawKeyword] = useState('')
+  const [keyword, setKeyword] = useState('')  // 防抖后的关键词
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
+  const [sortKey, setSortKey] = useState<SortKey>(() =>
+    (typeof window !== 'undefined' && (localStorage.getItem('sp_sort_key') as SortKey)) || 'recent'
+  )
   const [activeIndex, setActiveIndex] = useState(0)
+  const [showBackToTop, setShowBackToTop] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+
+  useEffect(() => { try { localStorage.setItem('sp_sort_key', sortKey) } catch { /* ignore */ } }, [sortKey])
+
+  // 防抖
+  useEffect(() => {
+    const t = setTimeout(() => setKeyword(rawKeyword.trim()), 150)
+    return () => clearTimeout(t)
+  }, [rawKeyword])
 
   const selected = useMemo(
     () => sessions.find(s => s.username === value),
     [sessions, value]
   )
 
-  const filtered = useMemo(() => {
-    const kw = keyword.trim().toLowerCase()
-    if (!kw) return sessions
-    return sessions.filter(s =>
-      s.displayName.toLowerCase().includes(kw) ||
-      s.username.toLowerCase().includes(kw)
-    )
-  }, [sessions, keyword])
+  // 预计算每个会话的拼音首字母（缓存）
+  const sessionsWithInitials = useMemo(
+    () => sessions.map(s => ({
+      ...s,
+      _initials: getPinyinInitials(s.displayName || '')
+    })),
+    [sessions]
+  )
 
-  // 打开时自动聚焦搜索、重置 activeIndex
+  const filtered = useMemo(() => {
+    let list = sessionsWithInitials
+
+    // 类型过滤
+    if (typeFilter !== 'all') {
+      list = list.filter(s => {
+        const isGroup = s.username.includes('@chatroom')
+        return typeFilter === 'group' ? isGroup : !isGroup
+      })
+    }
+
+    // 关键词过滤
+    const kw = keyword.toLowerCase()
+    if (kw) {
+      list = list.filter(s => {
+        if (s.displayName.toLowerCase().includes(kw)) return true
+        if (s.username.toLowerCase().includes(kw)) return true
+        if (s.alias && s.alias.toLowerCase().includes(kw)) return true
+        // 拼音首字母匹配（仅当关键词为纯字母时）
+        if (/^[a-z0-9]+$/.test(kw) && s._initials.includes(kw)) return true
+        return false
+      })
+    }
+
+    // 排序
+    const sorted = [...list]
+    if (sortKey === 'recent') {
+      sorted.sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0))
+    } else if (sortKey === 'count') {
+      sorted.sort((a, b) => (b.messageCount || 0) - (a.messageCount || 0))
+    } else if (sortKey === 'name') {
+      sorted.sort((a, b) => (a.displayName || '').localeCompare(b.displayName || '', 'zh-Hans-CN'))
+    }
+
+    // 置顶优先
+    sorted.sort((a, b) => {
+      if (a.isPinned === b.isPinned) return 0
+      return a.isPinned ? -1 : 1
+    })
+
+    return sorted
+  }, [sessionsWithInitials, typeFilter, keyword, sortKey])
+
+  // 打开时自动聚焦 + 重置
   useEffect(() => {
     if (open) {
       setActiveIndex(0)
@@ -72,6 +153,7 @@ export function SessionPicker({
     const handler = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
         setOpen(false)
+        setRawKeyword('')
         setKeyword('')
       }
     }
@@ -79,7 +161,6 @@ export function SessionPicker({
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  // activeIndex 变化时滚动到可见区
   useEffect(() => {
     if (open && filtered.length > 0) {
       virtuosoRef.current?.scrollIntoView({ index: activeIndex, behavior: 'auto' })
@@ -106,14 +187,20 @@ export function SessionPicker({
       if (target) {
         onChange(target.username)
         setOpen(false)
+        setRawKeyword('')
         setKeyword('')
       }
     } else if (e.key === 'Escape') {
       e.preventDefault()
       setOpen(false)
+      setRawKeyword('')
       setKeyword('')
     }
   }, [open, filtered, activeIndex, onChange])
+
+  const scrollToTop = useCallback(() => {
+    virtuosoRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
 
   const renderItem = useCallback((index: number) => {
     const s = filtered[index]
@@ -127,6 +214,7 @@ export function SessionPicker({
         onClick={() => {
           onChange(s.username)
           setOpen(false)
+          setRawKeyword('')
           setKeyword('')
         }}
         onMouseEnter={() => setActiveIndex(index)}
@@ -139,7 +227,9 @@ export function SessionPicker({
         />
         <div className="sp-item-info">
           <div className="sp-item-top">
-            <span className="sp-item-name">{s.displayName || s.username}</span>
+            <span className="sp-item-name">
+              <Highlight text={s.displayName || s.username} keyword={keyword} />
+            </span>
             <span className="sp-item-time">{formatRelativeTime(s.lastTimestamp)}</span>
           </div>
           <div className="sp-item-bottom">
@@ -147,15 +237,25 @@ export function SessionPicker({
               {isGroup ? <Users size={10} /> : <User size={10} />}
               {isGroup ? '群聊' : '私聊'}
             </span>
+            {s.isPinned && <span className="sp-item-pinned">置顶</span>}
             {typeof s.messageCount === 'number' && s.messageCount > 0 && (
-              <span className="sp-item-count">{s.messageCount} 条</span>
+              <span className="sp-item-count">
+                <Hash size={9} />
+                {s.messageCount}
+              </span>
             )}
           </div>
         </div>
         {isSelected && <Check size={16} className="sp-item-check" />}
       </div>
     )
-  }, [filtered, value, activeIndex, onChange])
+  }, [filtered, value, activeIndex, onChange, keyword])
+
+  const groupCount = useMemo(
+    () => sessions.filter(s => s.username.includes('@chatroom')).length,
+    [sessions]
+  )
+  const privateCount = sessions.length - groupCount
 
   return (
     <div
@@ -196,38 +296,99 @@ export function SessionPicker({
             <input
               ref={inputRef}
               type="text"
-              placeholder="搜索会话名称..."
-              value={keyword}
-              onChange={e => { setKeyword(e.target.value); setActiveIndex(0) }}
+              placeholder="搜索名称 / wxid / 微信号 / 拼音首字母"
+              value={rawKeyword}
+              onChange={e => { setRawKeyword(e.target.value); setActiveIndex(0) }}
               className="sp-search-input"
             />
-            {keyword && (
+            {rawKeyword && (
               <button
                 type="button"
                 className="sp-search-clear"
-                onClick={() => { setKeyword(''); inputRef.current?.focus() }}
+                onClick={() => { setRawKeyword(''); setKeyword(''); inputRef.current?.focus() }}
               >
                 <X size={14} />
               </button>
             )}
           </div>
 
+          <div className="sp-toolbar">
+            {!hideTypeFilter && (
+              <div className="sp-type-filter">
+                <button
+                  type="button"
+                  className={typeFilter === 'all' ? 'active' : ''}
+                  onClick={() => setTypeFilter('all')}
+                ><MessagesSquare size={11} />全部 <span className="sp-count-tag">{sessions.length}</span></button>
+                <button
+                  type="button"
+                  className={typeFilter === 'private' ? 'active' : ''}
+                  onClick={() => setTypeFilter('private')}
+                ><User size={11} />私聊 <span className="sp-count-tag">{privateCount}</span></button>
+                <button
+                  type="button"
+                  className={typeFilter === 'group' ? 'active' : ''}
+                  onClick={() => setTypeFilter('group')}
+                ><Users size={11} />群聊 <span className="sp-count-tag">{groupCount}</span></button>
+              </div>
+            )}
+            <div className="sp-sort-row">
+              <span className="sp-sort-label">排序</span>
+              <button
+                type="button"
+                className={sortKey === 'recent' ? 'active' : ''}
+                onClick={() => setSortKey('recent')}
+                title="最近活跃优先"
+              ><Clock size={11} />活跃</button>
+              <button
+                type="button"
+                className={sortKey === 'count' ? 'active' : ''}
+                onClick={() => setSortKey('count')}
+                title="消息数量优先"
+              ><Hash size={11} />数量</button>
+              <button
+                type="button"
+                className={sortKey === 'name' ? 'active' : ''}
+                onClick={() => setSortKey('name')}
+                title="按名称 A-Z 排序"
+              >A→Z</button>
+            </div>
+          </div>
+
           {filtered.length === 0 ? (
-            <div className="sp-empty">无匹配会话</div>
+            <div className="sp-empty">
+              无匹配会话
+              {keyword && <div className="sp-empty-hint">当前关键词：&quot;{keyword}&quot;</div>}
+            </div>
           ) : (
-            <Virtuoso
-              ref={virtuosoRef}
-              className="sp-list"
-              style={{ height: 340 }}
-              totalCount={filtered.length}
-              itemContent={renderItem}
-              overscan={200}
-            />
+            <div className="sp-list-wrap">
+              <Virtuoso
+                ref={virtuosoRef}
+                className="sp-list"
+                style={{ height: 340 }}
+                totalCount={filtered.length}
+                itemContent={renderItem}
+                overscan={200}
+                atTopStateChange={(atTop) => setShowBackToTop(!atTop)}
+              />
+              {showBackToTop && (
+                <button
+                  type="button"
+                  className="sp-back-to-top"
+                  onClick={scrollToTop}
+                  title="回到顶部"
+                >
+                  <ArrowUp size={14} />
+                </button>
+              )}
+            </div>
           )}
 
           <div className="sp-footer">
-            共 {filtered.length} 个会话
-            {keyword && sessions.length !== filtered.length && ` / ${sessions.length}`}
+            <span>
+              {filtered.length} 个会话
+              {(keyword || typeFilter !== 'all') && sessions.length !== filtered.length && ` / 共 ${sessions.length}`}
+            </span>
             <span className="sp-hint">↑↓ 选择　Enter 确定　Esc 关闭</span>
           </div>
         </div>
