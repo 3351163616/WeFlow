@@ -1150,6 +1150,23 @@ export interface ElectronAPI {
     onError: (callback: (payload: { taskId: string; error: string }) => void) => () => void
     onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => () => void
   }
+  analyticsAi: {
+    generateStyleContrast: (params: {
+      sessionId: string
+      useBuiltinApi?: boolean
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      apiProvider?: 'openai' | 'anthropic'
+    }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    stop: (taskId: string) => Promise<{ success: boolean }>
+    getRemainingUses: () => Promise<{ remaining: number }>
+    onProgress: (callback: (payload: { taskId: string; message: string }) => void) => () => void
+    onChunk: (callback: (payload: { taskId: string; chunk: string }) => void) => () => void
+    onComplete: (callback: (payload: { taskId: string; fullText: string; meta?: { selfName: string; otherName: string } }) => void) => () => void
+    onError: (callback: (payload: { taskId: string; error: string }) => void) => () => void
+    onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => () => void
+  }
 }
 
 export interface ExportOptions {

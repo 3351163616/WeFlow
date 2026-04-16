@@ -121,3 +121,24 @@
     grid-template-columns: 1fr;
   }
 }
+
+.entry-card-icon.ai {
+  background: linear-gradient(135deg, #d97757 0%, #c2410c 100%);
+  color: #fff;
+}
+
+.chat-analytics-entry-card.ai-entry {
+  position: relative;
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: -20px;
+    right: -20px;
+    width: 80px;
+    height: 80px;
+    background: radial-gradient(circle, rgba(217, 119, 87, 0.12), transparent 70%);
+    pointer-events: none;
+  }
+}

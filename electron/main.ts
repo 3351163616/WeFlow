@@ -34,6 +34,7 @@ import { insightService } from './services/insightService'
 import { bizService } from './services/bizService'
 import { characterPromptService } from './services/characterPromptService'
 import { annualReportAiService } from './services/annualReportAiService'
+import { analyticsAiService } from './services/analyticsAiService'
 import { characterPromptRedeemService } from './services/characterPromptRedeemService'
 
 // 配置自动更新
@@ -1700,6 +1701,17 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('annualReportAi:getRemainingUses', async () => {
     return annualReportAiService.getRemainingUses()
+  })
+
+  // 聊天分析 AI 风格对比
+  ipcMain.handle('analyticsAi:generateStyleContrast', async (_, params) => {
+    return analyticsAiService.generateStyleContrast(params)
+  })
+  ipcMain.handle('analyticsAi:stop', async (_, taskId: string) => {
+    return analyticsAiService.stop(taskId)
+  })
+  ipcMain.handle('analyticsAi:getRemainingUses', async () => {
+    return analyticsAiService.getRemainingUses()
   })
 
   ipcMain.handle('config:clear', async () => {
@@ -3635,6 +3647,7 @@ app.whenReady().then(async () => {
   registerIpcHandlers()
   characterPromptService.setConfig(configService)
   annualReportAiService.setConfig(configService)
+  analyticsAiService.setConfig(configService)
   characterPromptRedeemService.setConfig(configService)
   chatService.addDbMonitorListener((type, json) => {
     messagePushService.handleDbMonitorChange(type, json)
