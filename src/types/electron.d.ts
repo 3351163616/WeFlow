@@ -1167,6 +1167,23 @@ export interface ElectronAPI {
     onError: (callback: (payload: { taskId: string; error: string }) => void) => () => void
     onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => () => void
   }
+  ai: {
+    testConnection: (config: {
+      provider: 'openai' | 'anthropic'
+      apiBaseUrl: string
+      apiKey: string
+      model: string
+    }) => Promise<{
+      success: boolean
+      latencyMs?: number
+      statusCode?: number
+      returnedModel?: string
+      replyPreview?: string
+      errorKind?: 'unreachable' | 'auth' | 'model_not_found' | 'bad_response' | 'rate_limit' | 'http' | 'unknown'
+      errorMessage?: string
+      rawSnippet?: string
+    }>
+  }
 }
 
 export interface ExportOptions {

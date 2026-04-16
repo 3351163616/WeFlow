@@ -1714,6 +1714,12 @@ function registerIpcHandlers() {
     return analyticsAiService.getRemainingUses()
   })
 
+  // AI 连接性测试（不消耗兑换码）
+  ipcMain.handle('ai:testConnection', async (_, config: { provider: 'openai' | 'anthropic'; apiBaseUrl: string; apiKey: string; model: string }) => {
+    const { testAiConnection } = await import('./services/aiStreamService')
+    return testAiConnection(config)
+  })
+
   ipcMain.handle('config:clear', async () => {
     if (isLaunchAtStartupSupported() && getSystemLaunchAtStartup()) {
       const result = setSystemLaunchAtStartup(false)

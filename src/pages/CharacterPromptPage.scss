@@ -451,3 +451,133 @@
     }
   }
 }
+
+/* ─── AI 连接性测试 ─────────────────────────────────────── */
+.ai-tester {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  grid-column: 1 / -1;
+  font-family: "PingFang SC", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", "Hiragino Sans GB", "SimHei", system-ui, sans-serif;
+
+  .ai-tester-btn {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+
+    &:hover:not(:disabled) {
+      border-color: var(--accent-primary);
+      background: color-mix(in srgb, var(--accent-primary) 6%, var(--bg-primary));
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .spin { animation: tester-spin 1s linear infinite; }
+  }
+
+  .ai-tester-result {
+    font-size: 12px;
+    border-radius: 8px;
+    overflow: hidden;
+
+    &.success {
+      background: color-mix(in srgb, #22c55e 8%, var(--bg-primary));
+      border: 1px solid color-mix(in srgb, #22c55e 30%, transparent);
+      color: #166534;
+    }
+
+    &.error {
+      background: color-mix(in srgb, #ef4444 8%, var(--bg-primary));
+      border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+      color: #991b1b;
+    }
+  }
+
+  .ai-tester-msg {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-weight: 600;
+
+    .ai-tester-meta {
+      margin-left: auto;
+      font-weight: 500;
+      opacity: 0.78;
+      font-size: 11px;
+    }
+  }
+
+  .ai-tester-details {
+    summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 600;
+
+      &::-webkit-details-marker { display: none; }
+
+      .ai-tester-meta {
+        margin-left: auto;
+        font-weight: 500;
+        opacity: 0.78;
+        font-size: 11px;
+      }
+    }
+
+    &[open] summary {
+      border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    }
+  }
+
+  .ai-tester-body {
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--text-primary);
+
+    .ai-tester-row {
+      font-size: 12px;
+      line-height: 1.6;
+      font-weight: 500;
+
+      strong { font-weight: 600; color: #991b1b; margin-right: 4px; }
+
+      pre {
+        margin: 4px 0 0;
+        padding: 8px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--text-secondary);
+        background: var(--bg-secondary);
+        border-radius: 6px;
+        max-height: 160px;
+        overflow-y: auto;
+      }
+    }
+  }
+}
+
+@keyframes tester-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

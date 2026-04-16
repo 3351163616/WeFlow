@@ -642,5 +642,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('analyticsAi:usesUpdated', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('analyticsAi:usesUpdated')
     }
+  },
+  ai: {
+    testConnection: (config: { provider: 'openai' | 'anthropic'; apiBaseUrl: string; apiKey: string; model: string }) =>
+      ipcRenderer.invoke('ai:testConnection', config)
   }
 })

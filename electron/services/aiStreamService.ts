@@ -281,3 +281,232 @@ export async function callAiOnce(opts: Omit<CallAiOptions, 'onChunk'>): Promise<
   })
   return full
 }
+
+// ─── 连接性测试 ────────────────────────────────────────────────────────────
+
+export type TestErrorKind =
+  | 'unreachable'      // 网络不通 / 超时
+  | 'auth'             // 401/403
+  | 'model_not_found'  // 404 或模型不存在
+  | 'bad_response'     // 非预期格式
+  | 'rate_limit'       // 429
+  | 'http'             // 其他 HTTP 错误
+  | 'unknown'
+
+export interface AiTestResult {
+  success: boolean
+  latencyMs?: number
+  returnedModel?: string       // 服务端实际返回的 model 字段
+  replyPreview?: string        // 响应的前 200 字符预览
+  errorKind?: TestErrorKind
+  errorMessage?: string
+  rawSnippet?: string          // 原始响应片段（最多 500 字符）
+  statusCode?: number
+}
+
+/**
+ * 发送一次最小成本请求，验证配置可用性
+ * - OpenAI: max_tokens=5, 非流式
+ * - Anthropic: max_tokens=5, 非流式
+ */
+export function testAiConnection(config: AiConfig): Promise<AiTestResult> {
+  return new Promise((resolve) => {
+    const startTs = Date.now()
+
+    if (!config.apiBaseUrl || !config.apiKey || !config.model) {
+      resolve({
+        success: false,
+        errorKind: 'unknown',
+        errorMessage: '配置不完整：API 地址、Key、模型名称均不能为空'
+      })
+      return
+    }
+
+    let endpoint: string
+    let body: string
+    let headers: Record<string, string>
+
+    if (config.provider === 'anthropic') {
+      endpoint = buildAiApiUrl(config.apiBaseUrl, '/messages')
+      body = JSON.stringify({
+        model: config.model,
+        max_tokens: 5,
+        messages: [{ role: 'user', content: 'hi' }]
+      })
+      headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01'
+      }
+    } else {
+      endpoint = buildAiApiUrl(config.apiBaseUrl, '/chat/completions')
+      body = JSON.stringify({
+        model: config.model,
+        max_tokens: 5,
+        messages: [{ role: 'user', content: 'hi' }]
+      })
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${config.apiKey}`
+      }
+    }
+
+    let urlObj: URL
+    try {
+      urlObj = new URL(endpoint)
+    } catch {
+      resolve({
+        success: false,
+        errorKind: 'unknown',
+        errorMessage: `无效的 API URL：${endpoint}`
+      })
+      return
+    }
+
+    const reqOptions = {
+      hostname: urlObj.hostname,
+      port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST' as const,
+      headers: {
+        ...headers,
+        'Content-Length': Buffer.byteLength(body).toString()
+      }
+    }
+
+    const isHttps = urlObj.protocol === 'https:'
+    const requestFn = isHttps ? https.request : http.request
+
+    const req = requestFn(reqOptions, (res) => {
+      let raw = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => { raw += chunk })
+      res.on('end', () => {
+        const latencyMs = Date.now() - startTs
+        const statusCode = res.statusCode || 0
+        const rawSnippet = raw.slice(0, 500)
+
+        if (statusCode < 200 || statusCode >= 300) {
+          let kind: TestErrorKind = 'http'
+          if (statusCode === 401 || statusCode === 403) kind = 'auth'
+          else if (statusCode === 404) kind = 'model_not_found'
+          else if (statusCode === 429) kind = 'rate_limit'
+
+          // 尝试提取响应里的 "model not found" 之类关键词
+          if (/model.*(not.*found|does.*not.*exist|invalid.*model|unknown.*model)/i.test(raw)) {
+            kind = 'model_not_found'
+          }
+
+          let msg = `HTTP ${statusCode}`
+          try {
+            const parsed = JSON.parse(raw)
+            const m = parsed?.error?.message
+              || parsed?.error
+              || parsed?.message
+            if (typeof m === 'string') msg += `：${m.slice(0, 200)}`
+          } catch {
+            if (rawSnippet.trim()) msg += `：${rawSnippet.slice(0, 200)}`
+          }
+
+          resolve({
+            success: false,
+            latencyMs,
+            statusCode,
+            errorKind: kind,
+            errorMessage: msg,
+            rawSnippet
+          })
+          return
+        }
+
+        // 2xx 响应：尝试解析 content
+        try {
+          const parsed = JSON.parse(raw)
+          let reply = ''
+          let returnedModel: string | undefined
+
+          if (config.provider === 'anthropic') {
+            if (Array.isArray(parsed?.content)) {
+              reply = parsed.content
+                .filter((b: { type: string }) => b?.type === 'text')
+                .map((b: { text: string }) => b?.text || '')
+                .join('')
+            }
+            returnedModel = typeof parsed?.model === 'string' ? parsed.model : undefined
+          } else {
+            reply = parsed?.choices?.[0]?.message?.content
+              || parsed?.choices?.[0]?.text
+              || parsed?.choices?.[0]?.delta?.content
+              || ''
+            returnedModel = typeof parsed?.model === 'string' ? parsed.model : undefined
+          }
+
+          if (!reply && !returnedModel) {
+            resolve({
+              success: false,
+              latencyMs,
+              statusCode,
+              errorKind: 'bad_response',
+              errorMessage: '返回格式异常：未找到 content 字段',
+              rawSnippet
+            })
+            return
+          }
+
+          resolve({
+            success: true,
+            latencyMs,
+            statusCode,
+            returnedModel,
+            replyPreview: reply ? reply.slice(0, 200) : undefined
+          })
+        } catch {
+          resolve({
+            success: false,
+            latencyMs,
+            statusCode,
+            errorKind: 'bad_response',
+            errorMessage: '返回内容不是合法 JSON',
+            rawSnippet
+          })
+        }
+      })
+      res.on('error', (e) => {
+        resolve({
+          success: false,
+          latencyMs: Date.now() - startTs,
+          errorKind: 'unknown',
+          errorMessage: e.message
+        })
+      })
+    })
+
+    req.setTimeout(15_000, () => {
+      req.destroy()
+      resolve({
+        success: false,
+        latencyMs: Date.now() - startTs,
+        errorKind: 'unreachable',
+        errorMessage: '连接超时（15 秒）'
+      })
+    })
+
+    req.on('error', (e) => {
+      const msg = (e as NodeJS.ErrnoException).message || String(e)
+      const code = (e as NodeJS.ErrnoException).code
+      let kind: TestErrorKind = 'unreachable'
+      if (code === 'ENOTFOUND' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT' || code === 'EHOSTUNREACH') {
+        kind = 'unreachable'
+      }
+      resolve({
+        success: false,
+        latencyMs: Date.now() - startTs,
+        errorKind: kind,
+        errorMessage: `${code ? `[${code}] ` : ''}${msg}`
+      })
+    })
+
+    req.write(body)
+    req.end()
+  })
+}

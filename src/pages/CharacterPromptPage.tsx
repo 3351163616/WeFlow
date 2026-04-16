@@ -4,6 +4,7 @@ import { Sparkles, Square, Copy, Download, Loader2, KeyRound, Plug } from 'lucid
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SessionPicker } from '../components/SessionPicker'
+import { AiConnectionTester } from '../components/AiConnectionTester'
 import './CharacterPromptPage.scss'
 
 type ApiMode = 'self' | 'redeem'
@@ -334,6 +335,13 @@ export default function CharacterPromptPage() {
             <label>API Key</label>
             <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-..." disabled={isGenerating} />
           </div>
+          <AiConnectionTester
+            provider={apiProvider}
+            apiBaseUrl={apiUrl}
+            apiKey={apiKey}
+            apiModel={apiModel}
+            disabled={isGenerating}
+          />
         </div>
       )}
 
