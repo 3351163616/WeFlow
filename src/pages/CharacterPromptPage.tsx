@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { Sparkles, Square, Copy, Download, Loader2, KeyRound, Plug } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { SessionPicker } from '../components/SessionPicker'
 import './CharacterPromptPage.scss'
 
 type ApiMode = 'self' | 'redeem'
@@ -12,6 +13,7 @@ interface SessionOption {
   displayName: string
   type: number
   lastTimestamp?: number
+  avatarUrl?: string
 }
 
 interface MemberOption {
@@ -339,14 +341,13 @@ export default function CharacterPromptPage() {
       <div className="config-section single-col">
         <div className="config-row full-row">
           <label>选择会话</label>
-          <select value={selectedSession} onChange={e => setSelectedSession(e.target.value)} disabled={isGenerating}>
-            <option value="">请选择...</option>
-            {sessions.map(s => (
-              <option key={s.username} value={s.username}>
-                {s.displayName}{s.username.includes('@chatroom') ? ' (群聊)' : ''}
-              </option>
-            ))}
-          </select>
+          <SessionPicker
+            sessions={sessions}
+            value={selectedSession}
+            onChange={setSelectedSession}
+            disabled={isGenerating}
+            placeholder="请选择要分析的会话..."
+          />
         </div>
         <div className="config-row full-row">
           <label>目标成员</label>
