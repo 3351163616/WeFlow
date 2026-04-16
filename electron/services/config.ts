@@ -105,6 +105,9 @@ interface ConfigSchema {
   aiFootprintSystemPrompt: string
   /** 是否将 AI 见解调试日志输出到桌面 */
   aiInsightDebugLogEnabled: boolean
+
+  // 角色提示词：磁盘导出目录（供 JSONL 持久化缓存使用）
+  characterPromptExportDir: string
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -209,7 +212,8 @@ export class ConfigService {
       aiInsightTelegramChatIds: '',
       aiFootprintEnabled: false,
       aiFootprintSystemPrompt: '',
-      aiInsightDebugLogEnabled: false
+      aiInsightDebugLogEnabled: false,
+      characterPromptExportDir: ''
     }
 
     const storeOptions: any = {

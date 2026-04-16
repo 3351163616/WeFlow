@@ -51,6 +51,7 @@ export default function CharacterPromptPage() {
   const [redeemInput, setRedeemInput] = useState('')
   const [redeemMessage, setRedeemMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null)
   const [remainingUses, setRemainingUses] = useState(0)
+  const [exportDir, setExportDir] = useState('')
 
   // 会话 & 成员
   const [sessions, setSessions] = useState<SessionOption[]>([])
@@ -78,6 +79,7 @@ export default function CharacterPromptPage() {
   // 加载剩余次数
   useEffect(() => {
     window.electronAPI.characterPrompt.getRemainingUses().then(r => setRemainingUses(r.remaining))
+    window.electronAPI.characterPrompt.getExportDir().then(r => setExportDir(r.dir || ''))
   }, [])
 
   // 加载会话列表
@@ -162,6 +164,21 @@ export default function CharacterPromptPage() {
     }
   }, [redeemInput])
 
+  const handlePickExportDir = useCallback(async () => {
+    const r = await window.electronAPI.characterPrompt.pickExportDir()
+    if (!r.canceled && r.dir) {
+      setExportDir(r.dir)
+      setStatusMessage(`已设置导出目录：${r.dir}`)
+    }
+    return r
+  }, [])
+
+  const handleClearExportDir = useCallback(async () => {
+    await window.electronAPI.characterPrompt.setExportDir('')
+    setExportDir('')
+    setStatusMessage('已清除导出目录（下次将仅使用内存缓存）')
+  }, [])
+
   // 生成
   const handleGenerate = useCallback(async () => {
     if (!selectedSession || selectedMembers.size === 0) return
@@ -176,6 +193,18 @@ export default function CharacterPromptPage() {
     if (apiMode === 'self' && (!apiUrl || !apiKey)) {
       setStatusMessage('请先填写 API 地址和 Key')
       return
+    }
+
+    // 导出目录：未设置则弹窗要求选择；已设置则直接复用
+    let effectiveDir = exportDir
+    if (!effectiveDir) {
+      const r = await window.electronAPI.characterPrompt.pickExportDir()
+      if (r.canceled || !r.dir) {
+        setStatusMessage('已取消：需要选择一个导出目录用于保存聊天记录')
+        return
+      }
+      effectiveDir = r.dir
+      setExportDir(r.dir)
     }
 
     setIsGenerating(true)
@@ -379,6 +408,25 @@ export default function CharacterPromptPage() {
             </div>
           ) : (
             <span style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>请先选择会话</span>
+          )}
+        </div>
+      </div>
+
+      {/* 导出目录 */}
+      <div className="export-dir-row">
+        <div className="export-dir-label">聊天记录导出目录</div>
+        <div className="export-dir-value">
+          {exportDir ? (
+            <>
+              <span className="export-dir-path" title={exportDir}>{exportDir}</span>
+              <button type="button" className="export-dir-btn" onClick={handlePickExportDir} disabled={isGenerating}>更换</button>
+              <button type="button" className="export-dir-btn ghost" onClick={handleClearExportDir} disabled={isGenerating}>清除</button>
+            </>
+          ) : (
+            <>
+              <span className="export-dir-hint">未设置 — 首次生成时会提示选择，选中后记住此目录；后续相同会话将直接读磁盘</span>
+              <button type="button" className="export-dir-btn" onClick={handlePickExportDir} disabled={isGenerating}>选择目录</button>
+            </>
           )}
         </div>
       </div>

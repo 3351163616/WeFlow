@@ -1119,6 +1119,9 @@ export interface ElectronAPI {
     saveFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
     redeemCode: (code: string) => Promise<{ success: boolean; addedUses?: number; totalRemaining?: number; error?: string }>
     getRemainingUses: () => Promise<{ remaining: number }>
+    getExportDir: () => Promise<{ dir: string }>
+    pickExportDir: () => Promise<{ canceled: boolean; dir?: string }>
+    setExportDir: (dir: string) => Promise<{ success: boolean }>
     onProgress: (callback: (payload: { taskId: string; phase: string; message: string; targetName?: string }) => void) => () => void
     onChunk: (callback: (payload: { taskId: string; targetName: string; chunk: string }) => void) => () => void
     onComplete: (callback: (payload: { taskId: string; targetName: string; fullText: string }) => void) => () => void

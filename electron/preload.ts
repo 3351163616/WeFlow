@@ -564,6 +564,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('characterPrompt:redeemCode', code),
     getRemainingUses: () =>
       ipcRenderer.invoke('characterPrompt:getRemainingUses'),
+    getExportDir: () =>
+      ipcRenderer.invoke('characterPrompt:getExportDir'),
+    pickExportDir: () =>
+      ipcRenderer.invoke('characterPrompt:pickExportDir'),
+    setExportDir: (dir: string) =>
+      ipcRenderer.invoke('characterPrompt:setExportDir', dir),
     onProgress: (callback: (payload: { taskId: string; phase: string; message: string; targetName?: string }) => void) => {
       ipcRenderer.on('characterPrompt:progress', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('characterPrompt:progress')

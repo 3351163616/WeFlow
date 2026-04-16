@@ -1690,6 +1690,37 @@ function registerIpcHandlers() {
     return { remaining: characterPromptRedeemService.getRemainingUses() }
   })
 
+  // 角色提示词：导出目录管理
+  ipcMain.handle('characterPrompt:getExportDir', async () => {
+    const dir = String((configService.get as (k: string) => unknown)('characterPromptExportDir') || '').trim()
+    return { dir }
+  })
+  ipcMain.handle('characterPrompt:pickExportDir', async () => {
+    const { dialog } = await import('electron')
+    const mainWin = BrowserWindow.getAllWindows().find(w => !w.isDestroyed())
+    const result = mainWin
+      ? await dialog.showOpenDialog(mainWin, {
+          title: '选择聊天记录导出目录',
+          properties: ['openDirectory', 'createDirectory'],
+          buttonLabel: '选为导出目录'
+        })
+      : await dialog.showOpenDialog({
+          title: '选择聊天记录导出目录',
+          properties: ['openDirectory', 'createDirectory'],
+          buttonLabel: '选为导出目录'
+        })
+    if (result.canceled || !result.filePaths?.[0]) {
+      return { canceled: true }
+    }
+    const dir = result.filePaths[0]
+    ;(configService.set as (k: string, v: unknown) => void)('characterPromptExportDir', dir)
+    return { canceled: false, dir }
+  })
+  ipcMain.handle('characterPrompt:setExportDir', async (_, dir: string) => {
+    ;(configService.set as (k: string, v: unknown) => void)('characterPromptExportDir', dir || '')
+    return { success: true }
+  })
+
   // 年度报告 AI 叙事 / 标题
   ipcMain.handle('annualReportAi:generateNarration', async (_, params) => {
     return annualReportAiService.generateNarration(params)

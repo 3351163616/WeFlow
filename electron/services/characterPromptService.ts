@@ -16,6 +16,7 @@ import { chatService, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { CHARACTER_PROMPT_TEMPLATE } from './characterPromptTemplate'
 import { characterPromptRedeemService } from './characterPromptRedeemService'
+import { characterPromptExportStore } from './characterPromptExportStore'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -762,30 +763,52 @@ class CharacterPromptService {
         sessionDisplayName = otherName
       }
 
-      // 全量分页获取消息（ascending=true 按时间正序）- 带增量缓存
-      const cached = this.sessionCache.get(params.sessionId)
-      const allMessages: Message[] = cached ? cached.messages : []
-      const BATCH_SIZE = 500
-      let offset = cached ? cached.count : 0
-      const startOffset = offset
-      while (true) {
-        if (signal.aborted) throw new Error('已取消')
-        const result = await chatService.getMessages(
-          params.sessionId, offset, BATCH_SIZE, undefined, undefined, true
-        )
-        const batchMessages: Message[] = result?.messages || []
-        if (batchMessages.length === 0) break
-        allMessages.push(...batchMessages)
+      // 消息加载：优先走磁盘导出存储（若已配置目录）；未配置则走内存 LRU
+      const exportDir = String(this.config?.get('characterPromptExportDir' as 'aiModelApiBaseUrl') || '').trim()
+      let allMessages: Message[] = []
 
-        broadcast('characterPrompt:progress', {
-          taskId, phase: 'loading',
-          message: cached
-            ? `正在增量加载新消息... 已追加 ${allMessages.length - startOffset} 条`
-            : `正在加载聊天记录... 已加载 ${allMessages.length} 条`
+      if (exportDir) {
+        // 磁盘路径：首次落盘 or 增量追加 or 全量命中
+        const exportResult = await characterPromptExportStore.ensureExport({
+          dir: exportDir,
+          sessionId: params.sessionId,
+          myWxid,
+          sessionDisplayName,
+          selfDisplayName,
+          onProgress: (phase, message) => {
+            broadcast('characterPrompt:progress', { taskId, phase, message })
+          },
+          signal
         })
-
-        if (batchMessages.length < BATCH_SIZE) break
-        offset += BATCH_SIZE
+        allMessages = exportResult.messages
+        broadcast('characterPrompt:progress', {
+          taskId, phase: 'loaded',
+          message: `已${exportResult.hitKind === 'full' ? '命中' : exportResult.hitKind === 'incremental' ? '增量更新' : '导出'}聊天记录 ${allMessages.length} 条（来源：磁盘）`
+        })
+      } else {
+        // 内存 LRU 路径（兼容未配置导出目录的场景）
+        const cached = this.sessionCache.get(params.sessionId)
+        allMessages = cached ? cached.messages : []
+        const BATCH_SIZE = 500
+        let offset = cached ? cached.count : 0
+        const startOffset = offset
+        while (true) {
+          if (signal.aborted) throw new Error('已取消')
+          const result = await chatService.getMessages(
+            params.sessionId, offset, BATCH_SIZE, undefined, undefined, true
+          )
+          const batchMessages: Message[] = result?.messages || []
+          if (batchMessages.length === 0) break
+          allMessages.push(...batchMessages)
+          broadcast('characterPrompt:progress', {
+            taskId, phase: 'loading',
+            message: cached
+              ? `正在增量加载新消息... 已追加 ${allMessages.length - startOffset} 条`
+              : `正在加载聊天记录... 已加载 ${allMessages.length} 条`
+          })
+          if (batchMessages.length < BATCH_SIZE) break
+          offset += BATCH_SIZE
+        }
       }
 
       if (allMessages.length === 0) {
@@ -793,8 +816,9 @@ class CharacterPromptService {
         return
       }
 
-      // 写回缓存条目（引用共享，稍后若需格式化再更新 formatted）
-      const cacheEntry: SessionCacheEntry = cached || {
+      // 写回内存缓存（两条路径都复用，用于同进程后续重试/换目标）
+      const existingCache = this.sessionCache.get(params.sessionId)
+      const cacheEntry: SessionCacheEntry = existingCache || {
         count: 0, messages: allMessages, lastUsedAt: Date.now()
       }
       cacheEntry.messages = allMessages
