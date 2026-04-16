@@ -21,16 +21,18 @@
     height: 36px;
     padding: 0 10px 0 12px;
     border-radius: 8px;
-    border: 1px solid var(--border-primary);
-    background: var(--bg-primary);
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
     color: var(--text-primary);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    box-shadow: var(--shadow-sm);
 
     &:hover {
-      border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-primary));
+      border-color: var(--primary);
+      background: #fff;
     }
 
     .sp-trigger-name {
@@ -39,21 +41,22 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      color: var(--text-primary);
     }
 
     .sp-trigger-placeholder {
       flex: 1;
-      color: var(--text-secondary);
+      color: var(--text-tertiary);
       font-weight: 500;
     }
 
     .sp-trigger-badge {
       font-size: 11px;
-      font-weight: 600;
-      padding: 1px 6px;
+      font-weight: 700;
+      padding: 2px 7px;
       border-radius: 4px;
-      background: color-mix(in srgb, var(--accent-primary) 14%, transparent);
-      color: var(--accent-primary);
+      background: var(--primary);
+      color: #fff;
     }
 
     .sp-trigger-caret {
@@ -64,8 +67,8 @@
   }
 
   &.open .sp-trigger {
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-primary) 18%, transparent);
+    border-color: var(--primary);
+    box-shadow: var(--ring-focus);
 
     .sp-trigger-caret { transform: rotate(180deg); }
   }
@@ -76,10 +79,10 @@
     left: 0;
     right: 0;
     z-index: 20;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-primary);
+    background: #fff;
+    border: 1px solid var(--border-strong);
     border-radius: 10px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -141,8 +144,8 @@
     justify-content: space-between;
     gap: 10px;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border-primary);
-    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    background: #FBF9F4;
 
     button {
       display: inline-flex;
@@ -159,18 +162,20 @@
       transition: all 0.12s;
 
       &:hover:not(.active) {
-        background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+        background: var(--hover-overlay);
+        border-color: var(--border-color);
       }
 
       &.active {
-        background: var(--accent-primary);
+        background: var(--primary);
         color: #fff;
-        border-color: var(--accent-primary);
-        box-shadow: 0 1px 3px color-mix(in srgb, var(--accent-primary) 30%, transparent);
+        border-color: var(--primary-hover);
+        box-shadow: 0 1px 3px rgba(var(--primary-rgb), 0.35);
 
         .sp-count-tag {
-          background: rgba(255, 255, 255, 0.25);
+          background: rgba(255, 255, 255, 0.28);
           color: #fff;
+          font-weight: 700;
         }
       }
     }
@@ -182,10 +187,10 @@
 
     .sp-count-tag {
       font-size: 10px;
-      font-weight: 600;
+      font-weight: 700;
       padding: 1px 5px;
       border-radius: 8px;
-      background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+      background: rgba(0, 0, 0, 0.08);
       color: var(--text-secondary);
     }
 
@@ -245,18 +250,23 @@
     cursor: pointer;
     transition: background 0.1s ease;
     border-left: 3px solid transparent;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+
+    &:last-child { border-bottom: none; }
 
     &.active {
-      background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
+      background: var(--hover-overlay);
     }
 
     &.selected {
-      border-left-color: var(--accent-primary);
-      background: color-mix(in srgb, var(--accent-primary) 6%, transparent);
+      border-left-color: var(--primary);
+      background: rgba(var(--primary-rgb), 0.09);
+
+      .sp-item-name { color: var(--primary); font-weight: 700; }
     }
 
     &.selected.active {
-      background: color-mix(in srgb, var(--accent-primary) 14%, transparent);
+      background: rgba(var(--primary-rgb), 0.16);
     }
 
     .sp-item-info {
@@ -281,8 +291,8 @@
       white-space: nowrap;
 
       .sp-hl {
-        background: color-mix(in srgb, var(--accent-primary) 30%, transparent);
-        color: var(--accent-primary);
+        background: rgba(var(--primary-rgb), 0.22);
+        color: var(--primary-hover);
         padding: 0 2px;
         border-radius: 3px;
         font-weight: 700;

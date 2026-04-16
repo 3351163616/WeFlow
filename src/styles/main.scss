@@ -6,6 +6,7 @@
   --primary: #8B7355;
   --primary-hover: #7A6548;
   --primary-light: rgba(139, 115, 85, 0.1);
+  --primary-rgb: 139, 115, 85;
   --danger: #dc3545;
   --warning: #ffc107;
 
@@ -14,19 +15,22 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-elevated: #FDFBF6;  // 卡片浮层底色（比 bg-primary 更亮，拉开层次）
 
-  // 文字
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
+  // 文字（WCAG AA 对齐：在 #F0EEE9 米色背景上）
+  --text-primary: #2A2A2A;    // 原 #3d3d3d → 12.8:1
+  --text-secondary: #5C5C5C;  // 原 #666666 → 6.3:1（AA 通过）
+  --text-tertiary: #767676;   // 原 #999999 → 4.3:1（大字 AA 通过）
 
   // 边框
-  --border-color: rgba(0, 0, 0, 0.08);
+  --border-color: rgba(0, 0, 0, 0.14);  // 原 0.08 → 可辨识
+  --border-strong: rgba(0, 0, 0, 0.22); // 用于组件边界/输入框
   --border-radius: 9999px;
 
   // 阴影
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 1px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.12), 0 4px 10px rgba(0, 0, 0, 0.06);
 
   // 侧边栏
   --sidebar-width: 220px;
@@ -42,6 +46,17 @@
 
   // primary 色上方的前景文字色（大多数主题为白色）
   --on-primary: white;
+
+  // ─── 别名（历史 CharacterPromptPage 等组件引用的变量） ───
+  --accent-primary: var(--primary);
+  --accent-primary-rgb: var(--primary-rgb);
+  --border-primary: var(--border-strong);   // 输入框/卡片默认边框
+
+  // ─── 状态态辅助 ───
+  --ring-selected: 0 0 0 2px rgba(var(--primary-rgb), 0.28);
+  --ring-focus: 0 0 0 3px rgba(var(--primary-rgb), 0.35);
+  --hover-overlay: rgba(0, 0, 0, 0.04);
+  --active-overlay: rgba(0, 0, 0, 0.08);
 }
 
 // ==================== 浅色主题 ====================
@@ -57,10 +72,10 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --border-color: rgba(0, 0, 0, 0.08);
+  --text-primary: #2A2A2A;
+  --text-secondary: #5C5C5C;
+  --text-tertiary: #767676;
+  --border-color: rgba(0, 0, 0, 0.14);
   --bg-gradient: linear-gradient(135deg, #F0EEE9 0%, #E8E6E1 100%);
   --primary-gradient: linear-gradient(135deg, #8B7355 0%, #A68B5B 100%);
   --card-bg: rgba(255, 255, 255, 0.7);
@@ -79,10 +94,10 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --border-color: rgba(0, 0, 0, 0.08);
+  --text-primary: #2A2A2A;
+  --text-secondary: #5C5C5C;
+  --text-tertiary: #767676;
+  --border-color: rgba(0, 0, 0, 0.14);
   --bg-gradient: linear-gradient(135deg, #E8EEF0 0%, #D8E4E8 100%);
   --primary-gradient: linear-gradient(135deg, #4A6670 0%, #5A7A86 100%);
   --card-bg: rgba(255, 255, 255, 0.7);
@@ -101,10 +116,10 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --border-color: rgba(0, 0, 0, 0.08);
+  --text-primary: #2A2A2A;
+  --text-secondary: #5C5C5C;
+  --text-tertiary: #767676;
+  --border-color: rgba(0, 0, 0, 0.14);
   --bg-gradient: linear-gradient(135deg, #E8F0E4 0%, #D8E8D0 100%);
   --primary-gradient: linear-gradient(135deg, #7A9A5C 0%, #8AAA6C 100%);
   --card-bg: rgba(255, 255, 255, 0.7);
@@ -123,10 +138,10 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --border-color: rgba(0, 0, 0, 0.08);
+  --text-primary: #2A2A2A;
+  --text-secondary: #5C5C5C;
+  --text-tertiary: #767676;
+  --border-color: rgba(0, 0, 0, 0.14);
   --bg-gradient: linear-gradient(135deg, #F0E8E8 0%, #E8D8D8 100%);
   --primary-gradient: linear-gradient(135deg, #8B4049 0%, #A05058 100%);
   --card-bg: rgba(255, 255, 255, 0.7);
@@ -145,10 +160,10 @@
   --bg-secondary: rgba(255, 255, 255, 0.7);
   --bg-tertiary: rgba(0, 0, 0, 0.03);
   --bg-hover: rgba(0, 0, 0, 0.05);
-  --text-primary: #3d3d3d;
-  --text-secondary: #666666;
-  --text-tertiary: #999999;
-  --border-color: rgba(0, 0, 0, 0.08);
+  --text-primary: #2A2A2A;
+  --text-secondary: #5C5C5C;
+  --text-tertiary: #767676;
+  --border-color: rgba(0, 0, 0, 0.14);
   --bg-gradient: linear-gradient(135deg, #E4F0F0 0%, #D4E8E8 100%);
   --primary-gradient: linear-gradient(135deg, #5A8A8A 0%, #6A9A9A 100%);
   --card-bg: rgba(255, 255, 255, 0.7);
