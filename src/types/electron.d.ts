@@ -1122,7 +1122,7 @@ export interface ElectronAPI {
     getExportDir: () => Promise<{ dir: string }>
     pickExportDir: () => Promise<{ canceled: boolean; dir?: string }>
     setExportDir: (dir: string) => Promise<{ success: boolean }>
-    onProgress: (callback: (payload: { taskId: string; phase: string; message: string; targetName?: string }) => void) => () => void
+    onProgress: (callback: (payload: { taskId: string; phase: string; stage?: string; message: string; targetName?: string; current?: number; total?: number; indeterminate?: boolean }) => void) => () => void
     onChunk: (callback: (payload: { taskId: string; targetName: string; chunk: string }) => void) => () => void
     onComplete: (callback: (payload: { taskId: string; targetName: string; fullText: string }) => void) => () => void
     onError: (callback: (payload: { taskId: string; targetName?: string; error: string }) => void) => () => void

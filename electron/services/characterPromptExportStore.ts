@@ -95,6 +95,14 @@ function fromCompact(c: CompactMessage): Message {
   return m
 }
 
+export interface ExportProgressPayload {
+  stage: 'checking' | 'exporting' | 'reading' | 'appending'
+  message: string
+  current?: number
+  total?: number
+  indeterminate?: boolean
+}
+
 export interface EnsureExportResult {
   messages: Message[]
   hitKind: 'full' | 'incremental' | 'miss'
@@ -118,7 +126,7 @@ class CharacterPromptExportStore {
     myWxid: string
     sessionDisplayName: string
     selfDisplayName: string
-    onProgress?: (phase: 'miss' | 'incremental' | 'hit', message: string) => void
+    onProgress?: (payload: ExportProgressPayload) => void
     signal?: AbortSignal
   }): Promise<EnsureExportResult> {
     const { dir, sessionId, myWxid, sessionDisplayName, selfDisplayName, onProgress, signal } = params
@@ -138,21 +146,54 @@ class CharacterPromptExportStore {
     }
 
     // 2. 快速 count 探测（WCDB 单条 SQL，毫秒级）
+    onProgress?.({ stage: 'checking', message: '检查本地缓存...', indeterminate: true })
     const countResult = await wcdbService.getMessageCount(sessionId)
     const dbCount = Number(countResult?.count || 0)
 
     // 3. 命中判定
     if (oldMeta && oldMeta.messageCount === dbCount && dbCount > 0) {
-      onProgress?.('hit', `命中磁盘缓存，正在读取 ${dbCount} 条消息...`)
-      const messages = this.readJsonl(jsonl)
+      onProgress?.({
+        stage: 'reading',
+        message: '命中磁盘缓存，正在读取...',
+        current: 0,
+        total: dbCount
+      })
+      const messages = this.readJsonl(jsonl, (loaded) => {
+        onProgress?.({
+          stage: 'reading',
+          message: `正在从磁盘读取聊天记录...`,
+          current: loaded,
+          total: dbCount
+        })
+      })
       return { messages, hitKind: 'full', meta: oldMeta, path: jsonl }
     }
 
     // 4. 增量命中：已导出部分有效，仅追加新消息
     if (oldMeta && dbCount > oldMeta.messageCount) {
-      onProgress?.('incremental', `检测到 ${dbCount - oldMeta.messageCount} 条新消息，正在增量追加...`)
-      const existing = this.readJsonl(jsonl)
-      const newMessages = await this.loadFromDB(sessionId, oldMeta.messageCount, signal)
+      const delta = dbCount - oldMeta.messageCount
+      onProgress?.({
+        stage: 'reading',
+        message: `读取已缓存消息并追加 ${delta} 条新消息...`,
+        current: 0,
+        total: dbCount
+      })
+      const existing = this.readJsonl(jsonl, (loaded) => {
+        onProgress?.({
+          stage: 'reading',
+          message: `正在从磁盘读取已缓存消息...`,
+          current: loaded,
+          total: oldMeta.messageCount
+        })
+      })
+      const newMessages = await this.loadFromDB(sessionId, oldMeta.messageCount, delta, (loaded) => {
+        onProgress?.({
+          stage: 'appending',
+          message: `正在追加新消息到磁盘...`,
+          current: oldMeta.messageCount + loaded,
+          total: dbCount
+        })
+      }, signal)
       this.appendJsonl(jsonl, newMessages)
       const merged = [...existing, ...newMessages]
       const newMeta: ExportMeta = {
@@ -168,8 +209,20 @@ class CharacterPromptExportStore {
     }
 
     // 5. 未命中 / 作废：全量导出
-    onProgress?.('miss', `正在从数据库全量导出 ${dbCount} 条消息...`)
-    const allMessages = await this.loadFromDB(sessionId, 0, signal)
+    onProgress?.({
+      stage: 'exporting',
+      message: `正在从数据库全量导出聊天记录...`,
+      current: 0,
+      total: dbCount
+    })
+    const allMessages = await this.loadFromDB(sessionId, 0, dbCount, (loaded) => {
+      onProgress?.({
+        stage: 'exporting',
+        message: `正在从数据库导出聊天记录...`,
+        current: loaded,
+        total: dbCount
+      })
+    }, signal)
     this.writeJsonl(jsonl, allMessages)
     const newMeta: ExportMeta = {
       schemaVersion: SCHEMA_VERSION,
@@ -185,7 +238,13 @@ class CharacterPromptExportStore {
     return { messages: allMessages, hitKind: 'miss', meta: newMeta, path: jsonl }
   }
 
-  private async loadFromDB(sessionId: string, startOffset: number, signal?: AbortSignal): Promise<Message[]> {
+  private async loadFromDB(
+    sessionId: string,
+    startOffset: number,
+    expectedTotal: number,
+    onProgress?: (loaded: number) => void,
+    signal?: AbortSignal
+  ): Promise<Message[]> {
     const all: Message[] = []
     const BATCH = 500
     let offset = startOffset
@@ -195,8 +254,10 @@ class CharacterPromptExportStore {
       const batch: Message[] = r?.messages || []
       if (batch.length === 0) break
       all.push(...batch)
+      onProgress?.(all.length)
       if (batch.length < BATCH) break
       offset += BATCH
+      if (expectedTotal > 0 && all.length >= expectedTotal - startOffset) break
     }
     return all
   }
@@ -212,18 +273,22 @@ class CharacterPromptExportStore {
     appendFileSync(path, lines, 'utf-8')
   }
 
-  private readJsonl(path: string): Message[] {
+  private readJsonl(path: string, onProgress?: (loaded: number) => void): Message[] {
     if (!existsSync(path)) return []
     const text = readFileSync(path, 'utf-8')
     const out: Message[] = []
+    let counter = 0
     for (const line of text.split('\n')) {
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
         const parsed = JSON.parse(trimmed) as CompactMessage
         out.push(fromCompact(parsed))
+        counter++
+        if (onProgress && counter % 2000 === 0) onProgress(counter)
       } catch { /* 忽略损坏行 */ }
     }
+    onProgress?.(out.length)
     return out
   }
 

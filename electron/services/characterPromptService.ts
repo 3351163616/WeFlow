@@ -775,15 +775,27 @@ class CharacterPromptService {
           myWxid,
           sessionDisplayName,
           selfDisplayName,
-          onProgress: (phase, message) => {
-            broadcast('characterPrompt:progress', { taskId, phase, message })
+          onProgress: (payload) => {
+            broadcast('characterPrompt:progress', {
+              taskId,
+              phase: payload.stage,
+              stage: payload.stage,
+              message: payload.message,
+              current: payload.current,
+              total: payload.total,
+              indeterminate: payload.indeterminate
+            })
           },
           signal
         })
         allMessages = exportResult.messages
         broadcast('characterPrompt:progress', {
-          taskId, phase: 'loaded',
-          message: `已${exportResult.hitKind === 'full' ? '命中' : exportResult.hitKind === 'incremental' ? '增量更新' : '导出'}聊天记录 ${allMessages.length} 条（来源：磁盘）`
+          taskId,
+          phase: 'loaded',
+          stage: 'loaded',
+          message: `已${exportResult.hitKind === 'full' ? '命中' : exportResult.hitKind === 'incremental' ? '增量更新' : '导出'}聊天记录 ${allMessages.length} 条`,
+          current: allMessages.length,
+          total: allMessages.length
         })
       } else {
         // 内存 LRU 路径（兼容未配置导出目录的场景）
@@ -792,6 +804,8 @@ class CharacterPromptService {
         const BATCH_SIZE = 500
         let offset = cached ? cached.count : 0
         const startOffset = offset
+        const countResult = await wcdbService.getMessageCount(params.sessionId)
+        const dbTotal = Number(countResult?.count || 0)
         while (true) {
           if (signal.aborted) throw new Error('已取消')
           const result = await chatService.getMessages(
@@ -801,10 +815,14 @@ class CharacterPromptService {
           if (batchMessages.length === 0) break
           allMessages.push(...batchMessages)
           broadcast('characterPrompt:progress', {
-            taskId, phase: 'loading',
+            taskId,
+            phase: 'exporting',
+            stage: 'exporting',
             message: cached
-              ? `正在增量加载新消息... 已追加 ${allMessages.length - startOffset} 条`
-              : `正在加载聊天记录... 已加载 ${allMessages.length} 条`
+              ? `正在增量加载新消息...`
+              : `正在从数据库加载聊天记录...`,
+            current: allMessages.length,
+            total: dbTotal || undefined
           })
           if (batchMessages.length < BATCH_SIZE) break
           offset += BATCH_SIZE
@@ -827,8 +845,11 @@ class CharacterPromptService {
       cacheEntry.sessionDisplayName = sessionDisplayName
 
       broadcast('characterPrompt:progress', {
-        taskId, phase: 'formatting',
-        message: `已加载 ${allMessages.length} 条消息，正在格式化...`
+        taskId,
+        phase: 'formatting',
+        stage: 'formatting',
+        message: `正在格式化 ${allMessages.length} 条消息...`,
+        indeterminate: true
       })
 
       const formatKey = `${sessionType}|${params.sessionGap || 7200}|${selfDisplayName}|${sessionDisplayName}|${allMessages.length}`
@@ -894,18 +915,34 @@ class CharacterPromptService {
         }
 
         broadcast('characterPrompt:progress', {
-          taskId, phase: 'generating', targetName,
-          message: `正在为 ${targetName} 生成角色提示词...`
+          taskId,
+          phase: 'prompting',
+          stage: 'prompting',
+          targetName,
+          message: `正在请求 AI 为 ${targetName} 生成角色提示词...`,
+          indeterminate: true
         })
 
         const fullPrompt = buildPrompt(formatted.text, targetTag, targetName, formatted.tagToName)
 
         let fullText = ''
+        let streamStarted = false
         await callApiStream(
           apiProvider, apiBaseUrl, apiKey, apiModel, fullPrompt,
           (chunk) => {
             fullText += chunk
             broadcast('characterPrompt:chunk', { taskId, targetName, chunk })
+            if (!streamStarted) {
+              streamStarted = true
+              broadcast('characterPrompt:progress', {
+                taskId,
+                phase: 'streaming',
+                stage: 'streaming',
+                targetName,
+                message: `AI 正在为 ${targetName} 输出...`,
+                indeterminate: true
+              })
+            }
           },
           signal
         )

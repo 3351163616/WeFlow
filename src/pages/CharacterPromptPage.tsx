@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SessionPicker } from '../components/SessionPicker'
 import { AiConnectionTester } from '../components/AiConnectionTester'
+import { GenerationProgress, type ProgressStage } from '../components/GenerationProgress'
 import './CharacterPromptPage.scss'
 
 type ApiMode = 'self' | 'redeem'
@@ -66,6 +67,11 @@ export default function CharacterPromptPage() {
   const [statusMessage, setStatusMessage] = useState('')
   const [resultText, setResultText] = useState('')
   const [currentTarget, setCurrentTarget] = useState('')
+  const [progressStage, setProgressStage] = useState<ProgressStage>('idle')
+  const [progressCurrent, setProgressCurrent] = useState<number | undefined>(undefined)
+  const [progressTotal, setProgressTotal] = useState<number | undefined>(undefined)
+  const [progressIndeterminate, setProgressIndeterminate] = useState(false)
+  const [progressMessage, setProgressMessage] = useState('')
   const resultRef = useRef<HTMLDivElement>(null)
   const resultTextRef = useRef('')
 
@@ -127,7 +133,12 @@ export default function CharacterPromptPage() {
   useEffect(() => {
     const removeProgress = window.electronAPI.characterPrompt.onProgress((payload) => {
       setStatusMessage(payload.message)
+      setProgressMessage(payload.message)
       if (payload.targetName) setCurrentTarget(payload.targetName)
+      if (payload.stage) setProgressStage(payload.stage as ProgressStage)
+      setProgressCurrent(typeof payload.current === 'number' ? payload.current : undefined)
+      setProgressTotal(typeof payload.total === 'number' ? payload.total : undefined)
+      setProgressIndeterminate(!!payload.indeterminate)
     })
     const removeChunk = window.electronAPI.characterPrompt.onChunk((payload) => {
       resultTextRef.current += payload.chunk
@@ -211,6 +222,11 @@ export default function CharacterPromptPage() {
     setResultText('')
     resultTextRef.current = ''
     setStatusMessage('正在启动...')
+    setProgressStage('checking')
+    setProgressMessage('正在启动...')
+    setProgressCurrent(undefined)
+    setProgressTotal(undefined)
+    setProgressIndeterminate(true)
 
     const params: Record<string, unknown> = {
       sessionId: selectedSession,
@@ -439,13 +455,8 @@ export default function CharacterPromptPage() {
             生成角色提示词
             {apiMode === 'redeem' && remainingUses > 0 && ` (${remainingUses})`}
           </button>
-        ) : (
-          <button className="stop-btn" onClick={handleStop}>
-            <Square size={14} />
-            停止生成
-          </button>
-        )}
-        {statusMessage && (
+        ) : null}
+        {!isGenerating && statusMessage && (
           statusMessage.startsWith('错误') ? (
             <details className="error-box">
               <summary>生成失败，点击展开详情</summary>
@@ -456,6 +467,19 @@ export default function CharacterPromptPage() {
           )
         )}
       </div>
+
+      {/* 生成进度（带进度条 + 停止按钮） */}
+      <GenerationProgress
+        visible={isGenerating}
+        stage={progressStage}
+        message={progressMessage}
+        current={progressCurrent}
+        total={progressTotal}
+        indeterminate={progressIndeterminate}
+        targetName={currentTarget}
+        streamedChars={resultText.length}
+        onStop={handleStop}
+      />
 
       {/* 结果展示 */}
       <div className="result-section">
