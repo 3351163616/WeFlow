@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SessionPicker, type SessionPickerOption } from '../components/SessionPicker'
 import { AiConnectionTester } from '../components/AiConnectionTester'
+import { SampleRangePicker, defaultSampleSize } from '../components/SampleRangePicker'
 import '../pages/CharacterPromptPage.scss'
 
 type ApiMode = 'self' | 'redeem'
@@ -36,6 +37,11 @@ export default function AnalyticsStyleContrastPage() {
   const resultRef = useRef<HTMLDivElement>(null)
   const resultTextRef = useRef('')
 
+  // 采样范围（受 SampleRangePicker 控制）
+  const [totalMessages, setTotalMessages] = useState(0)
+  const [sampleSize, setSampleSize] = useState(0)
+  const [loadingTotal, setLoadingTotal] = useState(false)
+
   useEffect(() => { localStorage.setItem(STORAGE_KEY_MODE, apiMode) }, [apiMode])
   useEffect(() => { localStorage.setItem(STORAGE_KEY_PROVIDER, apiProvider) }, [apiProvider])
   useEffect(() => { localStorage.setItem(STORAGE_KEY_URL, apiUrl) }, [apiUrl])
@@ -56,6 +62,27 @@ export default function AnalyticsStyleContrastPage() {
       }
     })
   }, [])
+
+  // 选中会话变化时拉取该会话总消息数，并把 sampleSize 重置到默认档位
+  useEffect(() => {
+    if (!selectedSession) {
+      setTotalMessages(0)
+      setSampleSize(0)
+      return
+    }
+    setLoadingTotal(true)
+    window.electronAPI.characterPrompt.getMembers(selectedSession)
+      .then(r => {
+        const total = r.totalMessages || 0
+        setTotalMessages(total)
+        setSampleSize(defaultSampleSize(total))
+      })
+      .catch(() => {
+        setTotalMessages(0)
+        setSampleSize(0)
+      })
+      .finally(() => setLoadingTotal(false))
+  }, [selectedSession])
 
   useEffect(() => {
     const offProg = window.electronAPI.analyticsAi.onProgress((p) => setStatusMessage(p.message))
@@ -96,6 +123,7 @@ export default function AnalyticsStyleContrastPage() {
     setStatusMessage('正在启动...')
 
     const params: Record<string, unknown> = { sessionId: selectedSession, apiProvider }
+    if (sampleSize > 0) params.sampleSize = sampleSize
     if (apiMode === 'self') {
       params.apiBaseUrl = apiUrl
       params.apiKey = apiKey
@@ -112,7 +140,7 @@ export default function AnalyticsStyleContrastPage() {
       setStatusMessage(`启动失败: ${r.error}`)
       setIsGenerating(false)
     }
-  }, [selectedSession, apiMode, remainingUses, apiUrl, apiKey, apiModel, apiProvider])
+  }, [selectedSession, apiMode, remainingUses, apiUrl, apiKey, apiModel, apiProvider, sampleSize])
 
   const handleStop = useCallback(() => {
     if (taskId) window.electronAPI.analyticsAi.stop(taskId)
@@ -206,6 +234,22 @@ export default function AnalyticsStyleContrastPage() {
             disabled={isGenerating}
             placeholder="请选择一个双人会话（不支持群聊）..."
           />
+        </div>
+        <div className="config-row full-row">
+          <label>分析样本</label>
+          {loadingTotal ? (
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', marginRight: 4 }} />
+              正在获取消息总数...
+            </span>
+          ) : (
+            <SampleRangePicker
+              totalCount={totalMessages}
+              value={sampleSize}
+              onChange={setSampleSize}
+              disabled={isGenerating}
+            />
+          )}
         </div>
       </div>
 

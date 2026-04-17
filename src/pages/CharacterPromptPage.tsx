@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import { SessionPicker } from '../components/SessionPicker'
 import { AiConnectionTester } from '../components/AiConnectionTester'
 import { GenerationProgress } from '../components/GenerationProgress'
+import { SampleRangePicker, defaultSampleSize } from '../components/SampleRangePicker'
 import { useCharacterPromptStore } from '../stores/characterPromptStore'
 import './CharacterPromptPage.scss'
 
@@ -61,6 +62,10 @@ export default function CharacterPromptPage() {
   const [members, setMembers] = useState<MemberOption[]>([])
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set())
   const [loadingMembers, setLoadingMembers] = useState(false)
+
+  // 采样范围（跟 getMembers 一起加载）
+  const [totalMessages, setTotalMessages] = useState(0)
+  const [sampleSize, setSampleSize] = useState(0)
 
   // 生成状态 — 全部来自全局 store（跨路由持久）
   const taskId = useCharacterPromptStore(s => s.taskId)
@@ -120,11 +125,13 @@ export default function CharacterPromptPage() {
     }
   }, [initialSessionId, sessions])
 
-  // 选择会话后加载成员
+  // 选择会话后加载成员 + 总消息数（一次 IPC 拿齐）
   useEffect(() => {
     if (!selectedSession) {
       setMembers([])
       setSelectedMembers(new Set())
+      setTotalMessages(0)
+      setSampleSize(0)
       return
     }
     setLoadingMembers(true)
@@ -139,6 +146,13 @@ export default function CharacterPromptPage() {
           setSelectedMembers(new Set())
         }
       }
+      const total = result.totalMessages || 0
+      setTotalMessages(total)
+      setSampleSize(defaultSampleSize(total))
+    }).catch(() => {
+      setLoadingMembers(false)
+      setTotalMessages(0)
+      setSampleSize(0)
     })
   }, [selectedSession])
 
@@ -251,6 +265,7 @@ export default function CharacterPromptPage() {
       targetWxids: Array.from(selectedMembers),
       apiProvider
     }
+    if (sampleSize > 0) params.sampleSize = sampleSize
 
     if (apiMode === 'self') {
       params.apiBaseUrl = apiUrl
@@ -269,7 +284,7 @@ export default function CharacterPromptPage() {
     } else {
       storeErrorTask(result.error || '启动失败')
     }
-  }, [selectedSession, selectedMembers, apiMode, apiProvider, apiUrl, apiKey, apiModel, remainingUses, exportDir, storeSetStatus, storeStartTask, storeErrorTask])
+  }, [selectedSession, selectedMembers, apiMode, apiProvider, apiUrl, apiKey, apiModel, remainingUses, exportDir, sampleSize, storeSetStatus, storeStartTask, storeErrorTask])
 
   const handleStop = useCallback(() => {
     if (taskId) {
@@ -474,6 +489,15 @@ export default function CharacterPromptPage() {
           ) : (
             <span style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>请先选择会话</span>
           )}
+        </div>
+        <div className="config-row full-row">
+          <label>分析样本</label>
+          <SampleRangePicker
+            totalCount={totalMessages}
+            value={sampleSize}
+            onChange={setSampleSize}
+            disabled={isGenerating}
+          />
         </div>
       </div>
 
