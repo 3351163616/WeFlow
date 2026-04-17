@@ -7,9 +7,6 @@
  * 3. 生成流程编排（获取消息 → 格式化 → 组装 prompt → 流式调用 → IPC 推送 chunk）
  */
 
-import https from 'https'
-import http from 'http'
-import { URL } from 'url'
 import { BrowserWindow } from 'electron'
 import { ConfigService } from './config'
 import { chatService, type Message } from './chatService'
@@ -17,6 +14,7 @@ import { wcdbService } from './wcdbService'
 import { CHARACTER_PROMPT_TEMPLATE } from './characterPromptTemplate'
 import { characterPromptRedeemService } from './characterPromptRedeemService'
 import { characterPromptExportStore } from './characterPromptExportStore'
+import { callAiStream } from './aiStreamService'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -268,43 +266,11 @@ function buildPrompt(
 
 // ─── 流式 LLM 调用 ─────────────────────────────────────────────────────────
 
-function buildApiUrl(baseUrl: string, path: string): string {
-  let base = baseUrl.replace(/\/+$/, '')
-  // 若用户填的是裸根（如 http://host:3000），自动补 /v1（OpenAI/Anthropic 兼容网关常见约定）
-  if (!/\/v\d+$/.test(base) && !/\/(openai|anthropic|api)/i.test(base)) {
-    base = `${base}/v1`
-  }
-  const suffix = path.startsWith('/') ? path : `/${path}`
-  return `${base}${suffix}`
-}
-
-class SSEParser {
-  private buffer = ''
-  private onEvent: (event: string, data: string) => void
-
-  constructor(onEvent: (event: string, data: string) => void) {
-    this.onEvent = onEvent
-  }
-
-  feed(chunk: string) {
-    this.buffer += chunk
-    const lines = this.buffer.split('\n')
-    this.buffer = lines.pop() || ''
-
-    let currentEvent = ''
-
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim()
-      } else if (line.startsWith('data: ')) {
-        const currentData = line.slice(6)
-        this.onEvent(currentEvent || 'data', currentData)
-        currentEvent = ''
-      }
-    }
-  }
-}
-
+/**
+ * 薄包装：委托给共享的 callAiStream，统一复用 URL 拼接、SSE 解析、
+ * 业务错误包识别（如智谱网关 {code,success:false,msg:"404 NOT_FOUND"}）等能力。
+ * max_tokens 固定 16384，与 Anthropic 原生调用的历史行为保持一致。
+ */
 function callApiStream(
   provider: 'openai' | 'anthropic',
   apiBaseUrl: string,
@@ -314,186 +280,12 @@ function callApiStream(
   onChunk: (text: string) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('已取消'))
-      return
-    }
-
-    let endpoint: string
-    let body: string
-    let headers: Record<string, string>
-
-    if (provider === 'anthropic') {
-      endpoint = buildApiUrl(apiBaseUrl, '/messages')
-      body = JSON.stringify({
-        model,
-        max_tokens: 16384,
-        stream: true,
-        messages: [{ role: 'user', content: promptContent }]
-      })
-      headers = {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      }
-    } else {
-      endpoint = buildApiUrl(apiBaseUrl, '/chat/completions')
-      body = JSON.stringify({
-        model,
-        stream: true,
-        messages: [{ role: 'user', content: promptContent }]
-      })
-      headers = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      }
-    }
-
-    let urlObj: URL
-    try {
-      urlObj = new URL(endpoint)
-    } catch {
-      reject(new Error(`无效的 API URL: ${endpoint}`))
-      return
-    }
-
-    const options = {
-      hostname: urlObj.hostname,
-      port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
-      path: urlObj.pathname + urlObj.search,
-      method: 'POST' as const,
-      headers: {
-        ...headers,
-        'Content-Length': Buffer.byteLength(body).toString()
-      }
-    }
-
-    const isHttps = urlObj.protocol === 'https:'
-    const requestFn = isHttps ? https.request : http.request
-
-    const req = requestFn(options, (res) => {
-      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
-        let errData = ''
-        res.on('data', (chunk) => { errData += chunk })
-        res.on('end', () => {
-          reject(new Error(`API 请求失败 (${res.statusCode}): ${errData.slice(0, 500)}`))
-        })
-        return
-      }
-
-      // 检测响应类型：SSE 流式 vs 非流式 JSON
-      const contentType = String(res.headers['content-type'] || '').toLowerCase()
-      const isStreaming = contentType.includes('event-stream') || contentType.includes('stream')
-
-      let receivedAnyChunk = false
-
-      // 累积所有原始响应，用于非流式兜底
-      let rawBuffer = ''
-
-      const parser = new SSEParser((event, data) => {
-        if (provider === 'anthropic') {
-          if (event === 'content_block_delta') {
-            try {
-              const parsed = JSON.parse(data)
-              const text = parsed?.delta?.text
-              if (typeof text === 'string') {
-                receivedAnyChunk = true
-                onChunk(text)
-              }
-            } catch { /* 忽略 */ }
-          }
-          if (event === 'error') {
-            try {
-              const parsed = JSON.parse(data)
-              reject(new Error(`Anthropic 流错误: ${parsed?.error?.message || data}`))
-            } catch {
-              reject(new Error(`Anthropic 流错误: ${data}`))
-            }
-          }
-        } else {
-          if (data.trim() === '[DONE]') return
-          try {
-            const parsed = JSON.parse(data)
-            const text = parsed?.choices?.[0]?.delta?.content
-            if (typeof text === 'string') {
-              receivedAnyChunk = true
-              onChunk(text)
-            }
-          } catch { /* 忽略 */ }
-        }
-      })
-
-      res.setEncoding('utf8')
-      res.on('data', (chunk: string) => {
-        rawBuffer += chunk
-        parser.feed(chunk)
-      })
-      res.on('end', () => {
-        // 若 SSE 流式解析一个 chunk 都没产出，尝试按非流式 JSON 解析整段响应
-        if (!receivedAnyChunk && rawBuffer) {
-          try {
-            // 可能是标准 JSON 响应
-            const parsed = JSON.parse(rawBuffer)
-            let content = ''
-            if (provider === 'anthropic') {
-              // Anthropic: { content: [{ type: 'text', text: '...' }] }
-              if (Array.isArray(parsed?.content)) {
-                content = parsed.content
-                  .filter((b: { type: string }) => b?.type === 'text')
-                  .map((b: { text: string }) => b?.text || '')
-                  .join('')
-              }
-            } else {
-              // OpenAI: { choices: [{ message: { content: '...' } }] } 或 delta 格式
-              content = parsed?.choices?.[0]?.message?.content
-                || parsed?.choices?.[0]?.text
-                || parsed?.choices?.[0]?.delta?.content
-                || ''
-            }
-            if (content) {
-              onChunk(content)
-              receivedAnyChunk = true
-            }
-          } catch {
-            // 非 JSON，尝试纯文本
-            if (rawBuffer.trim()) {
-              onChunk(rawBuffer)
-              receivedAnyChunk = true
-            }
-          }
-        }
-
-        if (!receivedAnyChunk) {
-          reject(new Error(`API 返回空响应（Content-Type: ${contentType || '未知'}）：${rawBuffer.slice(0, 300)}`))
-        } else {
-          resolve()
-        }
-      })
-      res.on('error', (e) => reject(e))
-
-      // isStreaming 变量保留用于未来调试，目前两种情况统一处理
-      void isStreaming
-    })
-
-    req.setTimeout(600_000, () => {
-      req.destroy()
-      reject(new Error('API 请求超时（10分钟）'))
-    })
-
-    req.on('error', (e) => reject(e))
-
-    if (signal) {
-      const onAbort = () => {
-        req.destroy()
-        reject(new Error('已取消'))
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-      req.on('close', () => signal.removeEventListener('abort', onAbort))
-    }
-
-    req.write(body)
-    req.end()
+  return callAiStream({
+    config: { provider, apiBaseUrl, apiKey, model },
+    prompt: promptContent,
+    maxTokens: 16384,
+    onChunk,
+    signal
   })
 }
 
