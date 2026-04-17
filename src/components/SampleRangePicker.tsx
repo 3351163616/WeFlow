@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, Info } from 'lucide-react'
 import './SampleRangePicker.scss'
 
 /** 预设百分比档位 */
@@ -139,6 +139,11 @@ export function SampleRangePicker({
             )}
           </>
         )}
+      </div>
+
+      <div className="srp-explain">
+        <Info size={12} />
+        <span>按时间从新到旧，截取最近的 N 条消息参与分析（不是整段时间均匀抽样）</span>
       </div>
 
       <div className={`srp-readout ${overBudget ? 'warn' : ''}`}>

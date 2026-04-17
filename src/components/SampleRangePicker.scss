@@ -118,6 +118,20 @@
     }
   }
 
+  .srp-explain {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    line-height: 1.4;
+
+    svg {
+      flex-shrink: 0;
+      opacity: 0.7;
+    }
+  }
+
   .srp-readout {
     display: flex;
     flex-wrap: wrap;
