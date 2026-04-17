@@ -17,6 +17,8 @@ const SESSION_GAP_SECONDS = 2 * 3600
 
 export interface AnalyticsAiParams {
   sessionId: string
+  /** 用于 AI 分析的采样条数；不传时使用默认 TARGET_SAMPLE_SIZE */
+  sampleSize?: number
   useBuiltinApi?: boolean
   apiBaseUrl?: string
   apiKey?: string
@@ -94,7 +96,8 @@ class AnalyticsAiService {
       const myWxid = String(this.config?.get('myWxid') || '')
 
       // 1) 分层采样：按时间四等分，每段等量抽取，既保留早期也保留近期
-      const messages = await this.stratifiedSample(params.sessionId, TARGET_SAMPLE_SIZE, SAMPLE_SEGMENTS, signal)
+      const targetSize = Math.max(10, Math.floor(params.sampleSize ?? TARGET_SAMPLE_SIZE))
+      const messages = await this.stratifiedSample(params.sessionId, targetSize, SAMPLE_SEGMENTS, signal)
       if (!messages.length) {
         this.broadcast('analyticsAi:error', { taskId, error: '该会话没有消息记录' })
         return

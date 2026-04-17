@@ -550,6 +550,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       sessionId: string
       targetWxids: string[]
       sessionGap?: number
+      sampleSize?: number
       apiProvider: 'openai' | 'anthropic'
       apiBaseUrl?: string
       apiKey?: string
@@ -622,8 +623,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
   analyticsAi: {
-    generateStyleContrast: (params: unknown) =>
-      ipcRenderer.invoke('analyticsAi:generateStyleContrast', params),
+    generateStyleContrast: (params: {
+      sessionId: string
+      sampleSize?: number
+      useBuiltinApi?: boolean
+      apiProvider?: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+    }) => ipcRenderer.invoke('analyticsAi:generateStyleContrast', params),
     stop: (taskId: string) =>
       ipcRenderer.invoke('analyticsAi:stop', taskId),
     getRemainingUses: () =>

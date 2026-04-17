@@ -1103,12 +1103,14 @@ export interface ElectronAPI {
       }>
       sessionType?: 'private' | 'group'
       sessionDisplayName?: string
+      totalMessages?: number
       error?: string
     }>
     generate: (params: {
       sessionId: string
       targetWxids: string[]
       sessionGap?: number
+      sampleSize?: number
       apiProvider: 'openai' | 'anthropic'
       apiBaseUrl?: string
       apiKey?: string
@@ -1156,6 +1158,7 @@ export interface ElectronAPI {
   analyticsAi: {
     generateStyleContrast: (params: {
       sessionId: string
+      sampleSize?: number
       useBuiltinApi?: boolean
       apiBaseUrl?: string
       apiKey?: string

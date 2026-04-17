@@ -542,12 +542,13 @@ class CharacterPromptService {
     else this.sessionCache.clear()
   }
 
-  /** 获取会话成员列表（含发言量统计） */
+  /** 获取会话成员列表（含发言量统计）+ 总消息数（用于采样范围选择） */
   async getSessionMembers(sessionId: string): Promise<{
     success: boolean
     members?: MemberInfo[]
     sessionType?: 'private' | 'group'
     sessionDisplayName?: string
+    totalMessages?: number
     error?: string
   }> {
     try {
@@ -627,6 +628,7 @@ class CharacterPromptService {
           success: true,
           sessionType,
           sessionDisplayName: otherName,
+          totalMessages: totalCount,
           members: [
             { wxid: myWxid, displayName: selfName, messageCount: estSelf },
             { wxid: sessionId, displayName: otherName, messageCount: estOther }
@@ -722,7 +724,10 @@ class CharacterPromptService {
 
       const members: MemberInfo[] = resolved.sort((a, b) => b.messageCount - a.messageCount)
 
-      return { success: true, members, sessionType, sessionDisplayName }
+      const countResult = await wcdbService.getMessageCount(sessionId).catch(() => ({ count: 0 }))
+      const totalMessages = Number(countResult?.count || 0)
+
+      return { success: true, members, sessionType, sessionDisplayName, totalMessages }
     } catch (e) {
       return { success: false, error: `获取成员失败: ${(e as Error).message}` }
     }
