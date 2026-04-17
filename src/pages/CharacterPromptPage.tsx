@@ -453,16 +453,23 @@ export default function CharacterPromptPage() {
             </span>
           ) : members.length > 0 ? (
             <div className="member-select">
-              {members.map(m => (
-                <div
-                  key={m.wxid}
-                  className={`member-chip ${selectedMembers.has(m.wxid) ? 'selected' : ''}`}
-                  onClick={() => !isGenerating && toggleMember(m.wxid)}
-                >
-                  <span>{m.displayName}</span>
-                  <span className="msg-count">{m.messageCount}条</span>
-                </div>
-              ))}
+              {members.map(m => {
+                // 兜底：若 displayName 仍是 wxid_xxx 形式，前端再做一次友好化处理，避免暴露原始 wxid
+                const looksLikeRawWxid = /^wxid_[A-Za-z0-9_\-]+$/.test(m.displayName)
+                  || m.displayName === m.wxid
+                const friendlyName = looksLikeRawWxid ? '未命名成员' : m.displayName
+                return (
+                  <div
+                    key={m.wxid}
+                    className={`member-chip ${selectedMembers.has(m.wxid) ? 'selected' : ''}`}
+                    onClick={() => !isGenerating && toggleMember(m.wxid)}
+                    title={looksLikeRawWxid ? m.wxid : undefined}
+                  >
+                    <span>{friendlyName}</span>
+                    <span className="msg-count">{m.messageCount}条</span>
+                  </div>
+                )
+              })}
             </div>
           ) : (
             <span style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>请先选择会话</span>

@@ -40,7 +40,8 @@ export interface GenerateParams {
 interface FormattedResult {
   text: string
   tagToName: Record<string, string>
-  nameToTag: Record<string, string>
+  nameToTag: Record<string, string>       // 兼容字段：key 为 displayName（群聊已废弃，仅为类型保留）
+  wxidToTag: Record<string, string>       // 群聊/私聊通用：按 senderUsername 映射 tag
 }
 
 // ─── 内置 API 配置（兑换码路径使用） ────────────────────────────────────────
@@ -100,7 +101,8 @@ function buildMemberMap(
   sessionDisplayName: string,
   myWxid: string,
   selfDisplayName?: string, // 由调用方传入，与 getSessionMembers 保持一致（如 "我" / "我（昵称）"）
-): { nameToTag: Record<string, string>; tagToName: Record<string, string> } {
+  wxidToName?: Record<string, string>, // 群聊专用：wxid → 已解析的显示名（群备注 > 用户备注/昵称/alias）
+): { nameToTag: Record<string, string>; tagToName: Record<string, string>; wxidToTag: Record<string, string> } {
   // 自己的显示名：优先使用调用方传入的值（与前端一致），否则从消息采样提取
   let selfName = selfDisplayName || ''
   if (!selfName) {
@@ -115,35 +117,54 @@ function buildMemberMap(
 
   if (sessionType === 'private') {
     const otherName = sessionDisplayName || 'B'
+    const wxidToTag: Record<string, string> = {}
+    if (myWxid) wxidToTag[myWxid] = 'A'
     return {
       nameToTag: { [selfName]: 'A', [otherName]: 'B' },
-      tagToName: { 'A': selfName, 'B': otherName }
+      tagToName: { 'A': selfName, 'B': otherName },
+      wxidToTag
     }
   }
 
+  // 群聊：按 senderUsername 统计（原始消息的 senderDisplayName 通常为空，不可用）
   const counter: Record<string, number> = {}
   for (const msg of messages) {
-    const name = msg.senderDisplayName || ''
-    if (!name || name === sessionDisplayName) continue
     if (SKIP_LOCAL_TYPES.has(msg.localType)) continue
-    counter[name] = (counter[name] || 0) + 1
+    const wxid = (msg.senderUsername || '').trim()
+    if (!wxid || wxid === myWxid) continue
+    counter[wxid] = (counter[wxid] || 0) + 1
   }
 
   const othersSorted = Object.entries(counter)
-    .filter(([name]) => name !== selfName)
     .sort((a, b) => b[1] - a[1])
-    .map(([name]) => name)
+    .map(([wxid]) => wxid)
 
   const nameToTag: Record<string, string> = { [selfName]: 'A' }
   const tagToName: Record<string, string> = { 'A': selfName }
+  const wxidToTag: Record<string, string> = {}
+  if (myWxid) wxidToTag[myWxid] = 'A'
 
   for (let i = 0; i < othersSorted.length && i < 25; i++) {
     const tag = String.fromCharCode(66 + i)
-    nameToTag[othersSorted[i]] = tag
-    tagToName[tag] = othersSorted[i]
+    const wxid = othersSorted[i]
+    // 解析优先级：外部传入的 wxidToName → 采样 senderDisplayName（通常为空）→ wxid
+    let displayName = (wxidToName?.[wxid] || '').trim()
+    if (!displayName) {
+      // 采样消息里兜底
+      for (const msg of messages) {
+        if (msg.senderUsername === wxid && msg.senderDisplayName) {
+          displayName = msg.senderDisplayName
+          break
+        }
+      }
+    }
+    if (!displayName) displayName = wxid
+    wxidToTag[wxid] = tag
+    nameToTag[displayName] = tag
+    tagToName[tag] = displayName
   }
 
-  return { nameToTag, tagToName }
+  return { nameToTag, tagToName, wxidToTag }
 }
 
 function formatMessages(
@@ -153,15 +174,18 @@ function formatMessages(
   myWxid: string,
   sessionGap: number = 7200,
   selfDisplayName?: string,
+  wxidToName?: Record<string, string>,
 ): FormattedResult {
-  const { nameToTag, tagToName } = buildMemberMap(messages, sessionType, sessionDisplayName, myWxid, selfDisplayName)
+  const { nameToTag, tagToName, wxidToTag } = buildMemberMap(
+    messages, sessionType, sessionDisplayName, myWxid, selfDisplayName, wxidToName
+  )
 
   const sessions: Message[][] = []
   let current: Message[] = []
 
   for (const msg of messages) {
     if (SKIP_LOCAL_TYPES.has(msg.localType)) continue
-    if (sessionType === 'group' && msg.senderDisplayName === sessionDisplayName) continue
+    // 群聊无需按 senderDisplayName 过滤系统消息——系统消息一般 senderUsername 为空，由后续 tag 查表兜底跳过
 
     if (current.length > 0 && msg.createTime - current[current.length - 1].createTime > sessionGap) {
       sessions.push(current)
@@ -199,9 +223,9 @@ function formatMessages(
         // 私聊：直接按 isSend 映射，避免 senderDisplayName 为空导致丢消息
         tag = msg.isSend === 1 ? 'A' : 'B'
       } else {
-        // 群聊：按名字查表
-        const senderName = msg.senderDisplayName || ''
-        tag = nameToTag[senderName]
+        // 群聊：按 senderUsername (wxid) 查表；自己的消息可能缺 senderUsername，按 isSend 兜底
+        const wxid = (msg.senderUsername || '').trim() || (msg.isSend === 1 ? myWxid : '')
+        tag = wxidToTag[wxid]
       }
       if (!tag) continue
 
@@ -214,7 +238,7 @@ function formatMessages(
     }
   }
 
-  return { text: lines.join('\n'), tagToName, nameToTag }
+  return { text: lines.join('\n'), tagToName, nameToTag, wxidToTag }
 }
 
 // ─── Prompt 组装 ───────────────────────────────────────────────────────────
@@ -610,27 +634,93 @@ class CharacterPromptService {
         }
       }
 
-      // 群聊：采样最近 1000 条消息快速统计
+      // 群聊：采样最近 1000 条消息，仅用于统计各成员的发言量
+      // 显示名称改为从 contact（群内备注 / 用户备注 / 昵称 / alias）解析，避免直接暴露 wxid
       const sampleResult = await chatService.getLatestMessages(sessionId, 1000)
       const messages: Message[] = sampleResult?.messages || sampleResult || []
 
-      const counterMap: Record<string, { wxid: string; displayName: string; count: number }> = {}
+      const countMap = new Map<string, number>()
+      // 如果同一 wxid 在不同消息上看到多个 senderDisplayName，记录频次便于兜底时取最高频者
+      const sampleNameFreq = new Map<string, Map<string, number>>()
       for (const msg of messages) {
         if (SKIP_LOCAL_TYPES.has(msg.localType)) continue
         const wxid = msg.senderUsername || (msg.isSend === 1 ? myWxid : '')
         if (!wxid) continue
-        const name = msg.senderDisplayName || wxid
-        if (!counterMap[wxid]) {
-          counterMap[wxid] = { wxid, displayName: name, count: 0 }
-        }
-        counterMap[wxid].count++
-        if (msg.senderDisplayName) {
-          counterMap[wxid].displayName = msg.senderDisplayName
+        countMap.set(wxid, (countMap.get(wxid) || 0) + 1)
+        const sampleName = (msg.senderDisplayName || '').trim()
+        if (sampleName && sampleName !== wxid) {
+          let perWxid = sampleNameFreq.get(wxid)
+          if (!perWxid) {
+            perWxid = new Map<string, number>()
+            sampleNameFreq.set(wxid, perWxid)
+          }
+          perWxid.set(sampleName, (perWxid.get(sampleName) || 0) + 1)
         }
       }
 
-      const members: MemberInfo[] = Object.values(counterMap)
-        .sort((a, b) => b.count - a.count)
+      const usernames = Array.from(countMap.keys())
+      if (usernames.length === 0) {
+        return { success: true, members: [], sessionType, sessionDisplayName }
+      }
+
+      // 并发拉取群内备注 + 联系人备注/昵称/alias
+      const [groupNickResult, displayNameResult] = await Promise.all([
+        wcdbService.getGroupNicknames(sessionId).catch(() => ({ success: false })) as Promise<{ success: boolean; nicknames?: Record<string, string> }>,
+        wcdbService.getDisplayNames(usernames).catch(() => ({ success: false })) as Promise<{ success: boolean; map?: Record<string, string> }>
+      ])
+      const groupNickMap: Record<string, string> = (groupNickResult.success && groupNickResult.nicknames) || {}
+      const displayNameMap: Record<string, string> = (displayNameResult.success && displayNameResult.map) || {}
+
+      // 采样名称 top1 辅助映射（当联系人数据缺失时兜底）
+      const topSampleName = (wxid: string): string => {
+        const perWxid = sampleNameFreq.get(wxid)
+        if (!perWxid || perWxid.size === 0) return ''
+        let bestName = ''
+        let bestCount = 0
+        for (const [name, cnt] of perWxid) {
+          if (cnt > bestCount) {
+            bestCount = cnt
+            bestName = name
+          }
+        }
+        return bestName
+      }
+
+      // 未命中群备注时最后一次尝试 contact.getContact（覆盖 getDisplayNames 返回 username 兜底的情况）
+      const resolveDisplayName = async (wxid: string): Promise<string> => {
+        const groupNick = (groupNickMap[wxid] || '').trim()
+        if (groupNick && groupNick !== wxid) return groupNick
+
+        const fromBulk = (displayNameMap[wxid] || '').trim()
+        if (fromBulk && fromBulk !== wxid) return fromBulk
+
+        // contact 单条兜底（remark > nickName > alias）
+        try {
+          const contact = await chatService.getContact(wxid)
+          if (contact) {
+            const picked = (contact.remark || contact.nickName || contact.alias || '').trim()
+            if (picked && picked !== wxid) return picked
+          }
+        } catch { /* 忽略 */ }
+
+        // 采样 senderDisplayName 频次最高者
+        const sample = topSampleName(wxid)
+        if (sample && sample !== wxid) return sample
+
+        return ''
+      }
+
+      const resolved = await Promise.all(usernames.map(async (wxid) => {
+        let displayName = await resolveDisplayName(wxid)
+        if (wxid === myWxid) {
+          displayName = displayName ? `我（${displayName}）` : '我'
+        } else if (!displayName) {
+          displayName = wxid // 极端兜底；前端会对 wxid_ 前缀做进一步保护
+        }
+        return { wxid, displayName, messageCount: countMap.get(wxid) || 0 }
+      }))
+
+      const members: MemberInfo[] = resolved.sort((a, b) => b.messageCount - a.messageCount)
 
       return { success: true, members, sessionType, sessionDisplayName }
     } catch (e) {
@@ -857,8 +947,50 @@ class CharacterPromptService {
       if (cacheEntry.formatKey === formatKey && cacheEntry.formatted) {
         formatted = cacheEntry.formatted
       } else {
+        // 群聊：批量解析 wxid → displayName（群内备注 > 用户备注/昵称/alias > 单条 contact 兜底）
+        let wxidToName: Record<string, string> = {}
+        if (isGroup) {
+          const uniqueWxids = Array.from(new Set(
+            allMessages
+              .map(m => (m as Message & { senderUsername?: string }).senderUsername || '')
+              .filter(w => w && w !== myWxid)
+          ))
+          // 加入所有目标 wxid，确保即便不在采样里也能有名字
+          for (const tw of params.targetWxids) {
+            if (tw && tw !== myWxid && !uniqueWxids.includes(tw)) uniqueWxids.push(tw)
+          }
+          if (uniqueWxids.length > 0) {
+            const [groupNickResult, displayNameResult] = await Promise.all([
+              wcdbService.getGroupNicknames(params.sessionId).catch(() => ({ success: false } as { success: boolean; nicknames?: Record<string, string> })),
+              wcdbService.getDisplayNames(uniqueWxids).catch(() => ({ success: false } as { success: boolean; map?: Record<string, string> }))
+            ])
+            const groupNickMap: Record<string, string> = (groupNickResult.success && groupNickResult.nicknames) || {}
+            const displayNameMap: Record<string, string> = (displayNameResult.success && displayNameResult.map) || {}
+            for (const wxid of uniqueWxids) {
+              const g = (groupNickMap[wxid] || '').trim()
+              if (g && g !== wxid) { wxidToName[wxid] = g; continue }
+              const d = (displayNameMap[wxid] || '').trim()
+              if (d && d !== wxid) { wxidToName[wxid] = d; continue }
+            }
+            // 未解析到名字的再逐个 contact 兜底
+            const missing = uniqueWxids.filter(w => !wxidToName[w])
+            if (missing.length > 0) {
+              await Promise.all(missing.map(async (w) => {
+                try {
+                  const contact = await chatService.getContact(w)
+                  if (contact) {
+                    const picked = (contact.remark || contact.nickName || contact.alias || '').trim()
+                    if (picked && picked !== w) wxidToName[w] = picked
+                  }
+                } catch { /* 忽略 */ }
+              }))
+            }
+          }
+        }
+
         formatted = formatMessages(
-          allMessages, sessionType, sessionDisplayName, myWxid, params.sessionGap || 7200, selfDisplayName
+          allMessages, sessionType, sessionDisplayName, myWxid,
+          params.sessionGap || 7200, selfDisplayName, wxidToName
         )
         cacheEntry.formatKey = formatKey
         cacheEntry.formatted = formatted
@@ -882,27 +1014,12 @@ class CharacterPromptService {
           targetTag = 'B'
           targetName = formatted.tagToName['B'] || sessionDisplayName
         }
-        // 3) 群聊：通过 senderUsername 找到对应的 senderDisplayName，再定位 tag
+        // 3) 群聊：按 wxid 直接查 wxidToTag
         else {
-          let resolvedName = ''
-          for (const msg of allMessages) {
-            if (msg.senderUsername === targetWxid && msg.senderDisplayName) {
-              resolvedName = msg.senderDisplayName
-              break
-            }
-          }
-          if (resolvedName && formatted.nameToTag[resolvedName]) {
-            targetTag = formatted.nameToTag[resolvedName]
-            targetName = resolvedName
-          } else {
-            // 兜底：直接用 targetWxid 作为 name 查表
-            for (const [name, tag] of Object.entries(formatted.nameToTag)) {
-              if (name === targetWxid || tag === targetWxid) {
-                targetTag = tag
-                targetName = name
-                break
-              }
-            }
+          const tag = formatted.wxidToTag[targetWxid]
+          if (tag) {
+            targetTag = tag
+            targetName = formatted.tagToName[tag] || targetWxid
           }
         }
 
