@@ -52,6 +52,7 @@ export default function CharacterPromptPage() {
   // 兑换码
   const [redeemInput, setRedeemInput] = useState('')
   const [redeemMessage, setRedeemMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null)
+  const [isRedeeming, setIsRedeeming] = useState(false)
   const [exportDir, setExportDir] = useState('')
 
   // 会话 & 成员
@@ -148,17 +149,27 @@ export default function CharacterPromptPage() {
 
   // 兑换码提交
   const handleRedeem = useCallback(async () => {
-    if (!redeemInput.trim()) return
+    if (!redeemInput.trim() || isRedeeming) return
     setRedeemMessage(null)
-    const result = await window.electronAPI.characterPrompt.redeemCode(redeemInput.trim())
-    if (result.success) {
-      setRedeemMessage({ text: `兑换成功！获得 ${result.addedUses} 次使用权限，当前剩余 ${result.totalRemaining} 次`, type: 'success' })
-      storeSetRemaining(result.totalRemaining || 0)
-      setRedeemInput('')
-    } else {
-      setRedeemMessage({ text: result.error || '兑换失败', type: 'error' })
+    setIsRedeeming(true)
+    try {
+      const result = await window.electronAPI.characterPrompt.redeemCode(redeemInput.trim())
+      if (result.success) {
+        setRedeemMessage({
+          text: `兑换成功！获得 ${result.addedUses} 次，当前剩余 ${result.totalRemaining} 次`,
+          type: 'success'
+        })
+        storeSetRemaining(result.totalRemaining || 0)
+        setRedeemInput('')
+      } else {
+        setRedeemMessage({ text: result.error || '兑换失败', type: 'error' })
+      }
+    } catch (e) {
+      setRedeemMessage({ text: `兑换失败：${(e as Error).message}`, type: 'error' })
+    } finally {
+      setIsRedeeming(false)
     }
-  }, [redeemInput, storeSetRemaining])
+  }, [redeemInput, isRedeeming, storeSetRemaining])
 
   const handlePickExportDir = useCallback(async () => {
     const r = await window.electronAPI.characterPrompt.pickExportDir()
@@ -314,17 +325,37 @@ export default function CharacterPromptPage() {
               value={redeemInput}
               onChange={e => setRedeemInput(e.target.value.toUpperCase())}
               onKeyDown={e => e.key === 'Enter' && handleRedeem()}
-              placeholder="输入兑换码"
-              disabled={isGenerating}
+              placeholder="输入兑换码（示例：WF7K2M9X）"
+              disabled={isGenerating || isRedeeming}
               maxLength={12}
+              aria-label="兑换码输入框"
             />
-            <button onClick={handleRedeem} disabled={!redeemInput.trim() || isGenerating}>
-              兑换
+            <button
+              type="button"
+              className="redeem-btn"
+              onClick={handleRedeem}
+              disabled={!redeemInput.trim() || isGenerating || isRedeeming}
+              aria-label="提交兑换码"
+            >
+              {isRedeeming ? (
+                <>
+                  <Loader2 size={14} className="spin" />
+                  <span>兑换中...</span>
+                </>
+              ) : (
+                <>
+                  <KeyRound size={14} />
+                  <span>兑换</span>
+                </>
+              )}
             </button>
           </div>
 
           {redeemMessage && (
-            <div className={`redeem-message ${redeemMessage.type}`}>{redeemMessage.text}</div>
+            <div className={`redeem-message ${redeemMessage.type}`} role="status">
+              {redeemMessage.type === 'success' ? '✓ ' : '✕ '}
+              {redeemMessage.text}
+            </div>
           )}
 
           <div className="payment-guide">

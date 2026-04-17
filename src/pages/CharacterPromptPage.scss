@@ -685,3 +685,92 @@
     }
   }
 }
+
+/* ─── 兑换码 UX 增强 ─────────────────────────────────── */
+.character-prompt-page .redeem-section {
+  .redeem-input-row {
+    input {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+
+      &:focus {
+        border-color: var(--primary);
+        box-shadow: var(--ring-focus);
+      }
+    }
+
+    .redeem-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 18px;
+      height: 36px;
+      min-width: 96px;
+      justify-content: center;
+      border-radius: 8px;
+      border: 1px solid var(--primary-hover);
+      background: var(--primary);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      box-shadow: 0 1px 3px rgba(var(--primary-rgb), 0.3);
+
+      &:hover:not(:disabled) {
+        background: var(--primary-hover);
+        box-shadow: 0 2px 8px rgba(var(--primary-rgb), 0.4);
+        transform: translateY(-1px);
+      }
+
+      &:active:not(:disabled) {
+        transform: translateY(0);
+        box-shadow: 0 1px 3px rgba(var(--primary-rgb), 0.3);
+      }
+
+      &:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        box-shadow: none;
+        transform: none;
+      }
+
+      .spin { animation: cp-redeem-spin 0.9s linear infinite; }
+    }
+  }
+
+  .redeem-message {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 12px;
+    margin-top: 8px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    animation: cp-redeem-fade 0.2s ease-out;
+
+    &.success {
+      background: rgba(34, 197, 94, 0.12);
+      border: 1px solid rgba(34, 197, 94, 0.35);
+      color: #15803d;
+    }
+
+    &.error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      color: #b91c1c;
+    }
+  }
+}
+
+@keyframes cp-redeem-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes cp-redeem-fade {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
