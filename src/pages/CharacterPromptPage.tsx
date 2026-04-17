@@ -7,6 +7,7 @@ import { SessionPicker } from '../components/SessionPicker'
 import { AiConnectionTester } from '../components/AiConnectionTester'
 import { GenerationProgress } from '../components/GenerationProgress'
 import { SampleRangePicker, defaultSampleSize } from '../components/SampleRangePicker'
+import { enrichSessionAvatars } from '../utils/enrichSessionAvatars'
 import { useCharacterPromptStore } from '../stores/characterPromptStore'
 import './CharacterPromptPage.scss'
 
@@ -114,6 +115,19 @@ export default function CharacterPromptPage() {
           .filter(s => s.displayName)
           .sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0))
         setSessions(sorted)
+
+        // 异步补全 avatarUrl/displayName：后端 getSessions 为了首屏速度不会查 contact 表
+        void enrichSessionAvatars(sorted, (patch) => {
+          setSessions(prev => prev.map(s => {
+            const hit = patch[s.username]
+            if (!hit) return s
+            return {
+              ...s,
+              displayName: hit.displayName || s.displayName,
+              avatarUrl: hit.avatarUrl || s.avatarUrl
+            }
+          }))
+        })
       }
     })
   }, [])
