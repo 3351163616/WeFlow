@@ -86,6 +86,8 @@ export interface CallAiOptions {
   prompt: string
   systemPrompt?: string
   maxTokens?: number
+  /** 采样温度，默认由 provider 决定（OpenAI 默认 1.0）；观察型/对比型任务建议 0.4–0.7 */
+  temperature?: number
   onChunk: (text: string) => void
   signal?: AbortSignal
 }
@@ -95,7 +97,7 @@ export interface CallAiOptions {
  * 同时兼容 OpenAI/Anthropic 两种协议，SSE + 非流式 JSON 自动回退
  */
 export function callAiStream(opts: CallAiOptions): Promise<void> {
-  const { config, prompt, systemPrompt, maxTokens = 16384, onChunk, signal } = opts
+  const { config, prompt, systemPrompt, maxTokens = 16384, temperature, onChunk, signal } = opts
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('已取消'))
@@ -115,6 +117,7 @@ export function callAiStream(opts: CallAiOptions): Promise<void> {
         messages: [{ role: 'user', content: prompt }]
       }
       if (systemPrompt) anthropicBody.system = systemPrompt
+      if (typeof temperature === 'number') anthropicBody.temperature = temperature
       body = JSON.stringify(anthropicBody)
       headers = {
         'Content-Type': 'application/json',
@@ -126,11 +129,13 @@ export function callAiStream(opts: CallAiOptions): Promise<void> {
       const messages: Array<{ role: string; content: string }> = []
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
       messages.push({ role: 'user', content: prompt })
-      body = JSON.stringify({
+      const openaiBody: Record<string, unknown> = {
         model: config.model,
         stream: true,
         messages
-      })
+      }
+      if (typeof temperature === 'number') openaiBody.temperature = temperature
+      body = JSON.stringify(openaiBody)
       headers = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${config.apiKey}`
