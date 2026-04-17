@@ -30,6 +30,8 @@ export interface GenerateParams {
   sessionId: string
   targetWxids: string[]
   sessionGap?: number
+  /** 用于生成的采样条数；未传 = 使用全部（保持旧行为） */
+  sampleSize?: number
   apiProvider: 'openai' | 'anthropic'
   apiBaseUrl?: string
   apiKey?: string
@@ -930,6 +932,7 @@ class CharacterPromptService {
       }
 
       // 写回内存缓存（两条路径都复用，用于同进程后续重试/换目标）
+      // 注意：缓存始终存原始全量 allMessages，采样只影响 formatted 内容，不影响缓存命中
       const existingCache = this.sessionCache.get(params.sessionId)
       const cacheEntry: SessionCacheEntry = existingCache || {
         count: 0, messages: allMessages, lastUsedAt: Date.now()
@@ -939,15 +942,24 @@ class CharacterPromptService {
       cacheEntry.selfDisplayName = selfDisplayName
       cacheEntry.sessionDisplayName = sessionDisplayName
 
+      // 按用户指定的 sampleSize 从最新一条向前倒推裁剪
+      // 未传 sampleSize 时保持旧行为（使用全部消息）
+      const sampleSize = typeof params.sampleSize === 'number' ? Math.floor(params.sampleSize) : 0
+      const workingMessages = (sampleSize > 0 && sampleSize < allMessages.length)
+        ? allMessages.slice(allMessages.length - sampleSize)
+        : allMessages
+
       broadcast('characterPrompt:progress', {
         taskId,
         phase: 'formatting',
         stage: 'formatting',
-        message: `正在格式化 ${allMessages.length} 条消息...`,
+        message: workingMessages.length < allMessages.length
+          ? `正在格式化 ${workingMessages.length} / ${allMessages.length} 条消息（按用户选择采样）...`
+          : `正在格式化 ${workingMessages.length} 条消息...`,
         indeterminate: true
       })
 
-      const formatKey = `${sessionType}|${params.sessionGap || 7200}|${selfDisplayName}|${sessionDisplayName}|${allMessages.length}`
+      const formatKey = `${sessionType}|${params.sessionGap || 7200}|${selfDisplayName}|${sessionDisplayName}|${workingMessages.length}|${allMessages.length}`
       let formatted: FormattedResult
       if (cacheEntry.formatKey === formatKey && cacheEntry.formatted) {
         formatted = cacheEntry.formatted
@@ -956,7 +968,7 @@ class CharacterPromptService {
         let wxidToName: Record<string, string> = {}
         if (isGroup) {
           const uniqueWxids = Array.from(new Set(
-            allMessages
+            workingMessages
               .map(m => (m as Message & { senderUsername?: string }).senderUsername || '')
               .filter(w => w && w !== myWxid)
           ))
@@ -994,7 +1006,7 @@ class CharacterPromptService {
         }
 
         formatted = formatMessages(
-          allMessages, sessionType, sessionDisplayName, myWxid,
+          workingMessages, sessionType, sessionDisplayName, myWxid,
           params.sessionGap || 7200, selfDisplayName, wxidToName
         )
         cacheEntry.formatKey = formatKey
