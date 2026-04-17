@@ -16,6 +16,7 @@ import DualReportWindow from './pages/DualReportWindow'
 import AgreementPage from './pages/AgreementPage'
 import GroupAnalyticsPage from './pages/GroupAnalyticsPage'
 import AnalyticsStyleContrastPage from './pages/AnalyticsStyleContrastPage'
+import { initCharacterPromptListeners } from './stores/characterPromptStore'
 import SettingsPage from './pages/SettingsPage'
 import ExportPage from './pages/ExportPage'
 import MyFootprintPage from './pages/MyFootprintPage'
@@ -116,6 +117,11 @@ function App() {
       settingsBackgroundRef.current = location
     }
   }, [location])
+
+  // 全局一次性：注册角色提示词 IPC 监听器，保证切换路由不会丢失流式任务
+  useEffect(() => {
+    initCharacterPromptListeners()
+  }, [])
 
   useEffect(() => {
     const removeCloseConfirmListener = window.electronAPI.window.onCloseConfirmRequested((payload) => {

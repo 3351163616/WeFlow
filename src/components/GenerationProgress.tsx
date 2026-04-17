@@ -1,4 +1,4 @@
-import { Square, Database, FileText, Cpu, Sparkles, HardDrive, CheckCircle2 } from 'lucide-react'
+import { Square, Database, FileText, Cpu, Sparkles, HardDrive, CheckCircle2, Pause, Play } from 'lucide-react'
 import './GenerationProgress.scss'
 
 export type ProgressStage =
@@ -21,7 +21,11 @@ interface GenerationProgressProps {
   indeterminate?: boolean
   targetName?: string
   streamedChars?: number
+  paused?: boolean
+  bufferedChars?: number
   onStop?: () => void
+  onPause?: () => void
+  onResume?: () => void
 }
 
 const STAGE_META: Record<ProgressStage, { icon: React.ReactNode; label: string; hint: string }> = {
@@ -43,7 +47,8 @@ function formatNumber(n: number): string {
 }
 
 export function GenerationProgress({
-  visible, stage, message, current, total, indeterminate, targetName, streamedChars, onStop
+  visible, stage, message, current, total, indeterminate, targetName, streamedChars,
+  paused, bufferedChars, onStop, onPause, onResume
 }: GenerationProgressProps) {
   if (!visible) return null
 
@@ -56,8 +61,11 @@ export function GenerationProgress({
     stage === 'checking' || stage === 'reading' || stage === 'appending' || stage === 'loaded' ? 'exporting' : stage
   const currentStageIdx = STAGE_ORDER.indexOf(normalizedStage)
 
+  // 仅在流式阶段允许暂停
+  const canPause = stage === 'streaming' && !!(onPause || onResume)
+
   return (
-    <div className="generation-progress">
+    <div className={`generation-progress ${paused ? 'paused' : ''}`}>
       {/* 顶部阶段条 */}
       <div className="gp-stepper">
         {STAGE_ORDER.map((s, idx) => {
@@ -75,20 +83,40 @@ export function GenerationProgress({
       <div className="gp-body">
         <div className="gp-header">
           <span className="gp-stage-icon">{meta.icon}</span>
-          <span className="gp-stage-label">{meta.label}</span>
+          <span className="gp-stage-label">
+            {meta.label}
+            {paused && <span className="gp-paused-tag">已暂停</span>}
+          </span>
           {targetName && <span className="gp-target">· {targetName}</span>}
           {hasDeterminate && (
             <span className="gp-percent">{percent}%</span>
           )}
-          {onStop && (
-            <button type="button" className="gp-stop-btn" onClick={onStop}>
-              <Square size={12} />
-              停止
-            </button>
-          )}
+          <div className="gp-actions">
+            {canPause && !paused && (
+              <button type="button" className="gp-action-btn" onClick={onPause} title="暂停渲染（不中断 AI）">
+                <Pause size={12} />
+                暂停
+              </button>
+            )}
+            {canPause && paused && (
+              <button type="button" className="gp-action-btn primary" onClick={onResume} title="继续渲染">
+                <Play size={12} />
+                继续
+                {typeof bufferedChars === 'number' && bufferedChars > 0 && (
+                  <span className="gp-buffered-count">+{bufferedChars}</span>
+                )}
+              </button>
+            )}
+            {onStop && (
+              <button type="button" className="gp-stop-btn" onClick={onStop}>
+                <Square size={12} />
+                停止
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className={`gp-bar ${hasDeterminate ? 'determinate' : 'indeterminate'}`}>
+        <div className={`gp-bar ${hasDeterminate ? 'determinate' : 'indeterminate'} ${paused ? 'frozen' : ''}`}>
           <div
             className="gp-bar-fill"
             style={hasDeterminate ? { width: `${percent}%` } : undefined}
@@ -96,7 +124,9 @@ export function GenerationProgress({
         </div>
 
         <div className="gp-meta">
-          <span className="gp-message">{message || meta.hint}</span>
+          <span className="gp-message">
+            {paused ? `已暂停 · AI 仍在接收中（${bufferedChars || 0} 字待补齐）` : (message || meta.hint)}
+          </span>
           <span className="gp-stats">
             {hasDeterminate && (
               <>

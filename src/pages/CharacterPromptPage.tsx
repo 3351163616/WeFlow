@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Sparkles, Square, Copy, Download, Loader2, KeyRound, Plug } from 'lucide-react'
+import { Sparkles, Copy, Download, Loader2, KeyRound, Plug } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SessionPicker } from '../components/SessionPicker'
 import { AiConnectionTester } from '../components/AiConnectionTester'
-import { GenerationProgress, type ProgressStage } from '../components/GenerationProgress'
+import { GenerationProgress } from '../components/GenerationProgress'
+import { useCharacterPromptStore } from '../stores/characterPromptStore'
 import './CharacterPromptPage.scss'
 
 type ApiMode = 'self' | 'redeem'
@@ -51,7 +52,6 @@ export default function CharacterPromptPage() {
   // 兑换码
   const [redeemInput, setRedeemInput] = useState('')
   const [redeemMessage, setRedeemMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null)
-  const [remainingUses, setRemainingUses] = useState(0)
   const [exportDir, setExportDir] = useState('')
 
   // 会话 & 成员
@@ -61,19 +61,29 @@ export default function CharacterPromptPage() {
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set())
   const [loadingMembers, setLoadingMembers] = useState(false)
 
-  // 生成状态
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [taskId, setTaskId] = useState('')
-  const [statusMessage, setStatusMessage] = useState('')
-  const [resultText, setResultText] = useState('')
-  const [currentTarget, setCurrentTarget] = useState('')
-  const [progressStage, setProgressStage] = useState<ProgressStage>('idle')
-  const [progressCurrent, setProgressCurrent] = useState<number | undefined>(undefined)
-  const [progressTotal, setProgressTotal] = useState<number | undefined>(undefined)
-  const [progressIndeterminate, setProgressIndeterminate] = useState(false)
-  const [progressMessage, setProgressMessage] = useState('')
+  // 生成状态 — 全部来自全局 store（跨路由持久）
+  const taskId = useCharacterPromptStore(s => s.taskId)
+  const isGenerating = useCharacterPromptStore(s => s.isGenerating)
+  const isPaused = useCharacterPromptStore(s => s.isPaused)
+  const resultText = useCharacterPromptStore(s => s.resultText)
+  const pendingBufferLen = useCharacterPromptStore(s => s.pendingBuffer.length)
+  const currentTarget = useCharacterPromptStore(s => s.currentTarget)
+  const progressStage = useCharacterPromptStore(s => s.progressStage)
+  const progressCurrent = useCharacterPromptStore(s => s.progressCurrent)
+  const progressTotal = useCharacterPromptStore(s => s.progressTotal)
+  const progressIndeterminate = useCharacterPromptStore(s => s.progressIndeterminate)
+  const progressMessage = useCharacterPromptStore(s => s.progressMessage)
+  const statusMessage = useCharacterPromptStore(s => s.statusMessage)
+  const errorMessage = useCharacterPromptStore(s => s.errorMessage)
+  const remainingUses = useCharacterPromptStore(s => s.remainingUses)
+  const storeStartTask = useCharacterPromptStore(s => s.startTask)
+  const storeSetPaused = useCharacterPromptStore(s => s.setPaused)
+  const storeResetTask = useCharacterPromptStore(s => s.resetTask)
+  const storeSetStatus = useCharacterPromptStore(s => s.setStatusMessage)
+  const storeSetRemaining = useCharacterPromptStore(s => s.setRemainingUses)
+  const storeErrorTask = useCharacterPromptStore(s => s.errorTask)
+
   const resultRef = useRef<HTMLDivElement>(null)
-  const resultTextRef = useRef('')
 
   // 持久化 API 配置
   useEffect(() => { localStorage.setItem(STORAGE_KEY_MODE, apiMode) }, [apiMode])
@@ -82,9 +92,8 @@ export default function CharacterPromptPage() {
   useEffect(() => { localStorage.setItem(STORAGE_KEY_KEY, apiKey) }, [apiKey])
   useEffect(() => { localStorage.setItem(STORAGE_KEY_MODEL, apiModel) }, [apiModel])
 
-  // 加载剩余次数
+  // 加载剩余次数 & 导出目录（剩余次数已由 store 初始化订阅）
   useEffect(() => {
-    window.electronAPI.characterPrompt.getRemainingUses().then(r => setRemainingUses(r.remaining))
     window.electronAPI.characterPrompt.getExportDir().then(r => setExportDir(r.dir || ''))
   }, [])
 
@@ -129,37 +138,13 @@ export default function CharacterPromptPage() {
     })
   }, [selectedSession])
 
-  // IPC 事件监听
+  // IPC 监听已在 App 根部全局注册（initCharacterPromptListeners），无需在此订阅
+  // 结果区域滚动到底（基于 resultText 变化）
   useEffect(() => {
-    const removeProgress = window.electronAPI.characterPrompt.onProgress((payload) => {
-      setStatusMessage(payload.message)
-      setProgressMessage(payload.message)
-      if (payload.targetName) setCurrentTarget(payload.targetName)
-      if (payload.stage) setProgressStage(payload.stage as ProgressStage)
-      setProgressCurrent(typeof payload.current === 'number' ? payload.current : undefined)
-      setProgressTotal(typeof payload.total === 'number' ? payload.total : undefined)
-      setProgressIndeterminate(!!payload.indeterminate)
+    requestAnimationFrame(() => {
+      if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight
     })
-    const removeChunk = window.electronAPI.characterPrompt.onChunk((payload) => {
-      resultTextRef.current += payload.chunk
-      setResultText(resultTextRef.current)
-      requestAnimationFrame(() => {
-        if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight
-      })
-    })
-    const removeComplete = window.electronAPI.characterPrompt.onComplete((payload) => {
-      setStatusMessage(`${payload.targetName} 的角色提示词生成完成`)
-      setIsGenerating(false)
-    })
-    const removeError = window.electronAPI.characterPrompt.onError((payload) => {
-      setStatusMessage(`错误: ${payload.error}`)
-      setIsGenerating(false)
-    })
-    const removeUses = window.electronAPI.characterPrompt.onUsesUpdated((payload) => {
-      setRemainingUses(payload.remaining)
-    })
-    return () => { removeProgress(); removeChunk(); removeComplete(); removeError(); removeUses() }
-  }, [])
+  }, [resultText])
 
   // 兑换码提交
   const handleRedeem = useCallback(async () => {
@@ -168,27 +153,27 @@ export default function CharacterPromptPage() {
     const result = await window.electronAPI.characterPrompt.redeemCode(redeemInput.trim())
     if (result.success) {
       setRedeemMessage({ text: `兑换成功！获得 ${result.addedUses} 次使用权限，当前剩余 ${result.totalRemaining} 次`, type: 'success' })
-      setRemainingUses(result.totalRemaining || 0)
+      storeSetRemaining(result.totalRemaining || 0)
       setRedeemInput('')
     } else {
       setRedeemMessage({ text: result.error || '兑换失败', type: 'error' })
     }
-  }, [redeemInput])
+  }, [redeemInput, storeSetRemaining])
 
   const handlePickExportDir = useCallback(async () => {
     const r = await window.electronAPI.characterPrompt.pickExportDir()
     if (!r.canceled && r.dir) {
       setExportDir(r.dir)
-      setStatusMessage(`已设置导出目录：${r.dir}`)
+      storeSetStatus(`已设置导出目录：${r.dir}`)
     }
     return r
-  }, [])
+  }, [storeSetStatus])
 
   const handleClearExportDir = useCallback(async () => {
     await window.electronAPI.characterPrompt.setExportDir('')
     setExportDir('')
-    setStatusMessage('已清除导出目录（下次将仅使用内存缓存）')
-  }, [])
+    storeSetStatus('已清除导出目录（下次将仅使用内存缓存）')
+  }, [storeSetStatus])
 
   // 生成
   const handleGenerate = useCallback(async () => {
@@ -196,13 +181,13 @@ export default function CharacterPromptPage() {
 
     // 兑换码路径检查次数
     if (apiMode === 'redeem' && remainingUses <= 0) {
-      setStatusMessage('可用次数已耗尽，请兑换新的使用码')
+      storeSetStatus('可用次数已耗尽，请兑换新的使用码')
       return
     }
 
     // 自备 API 路径检查配置
     if (apiMode === 'self' && (!apiUrl || !apiKey)) {
-      setStatusMessage('请先填写 API 地址和 Key')
+      storeSetStatus('请先填写 API 地址和 Key')
       return
     }
 
@@ -211,22 +196,12 @@ export default function CharacterPromptPage() {
     if (!effectiveDir) {
       const r = await window.electronAPI.characterPrompt.pickExportDir()
       if (r.canceled || !r.dir) {
-        setStatusMessage('已取消：需要选择一个导出目录用于保存聊天记录')
+        storeSetStatus('已取消：需要选择一个导出目录用于保存聊天记录')
         return
       }
       effectiveDir = r.dir
       setExportDir(r.dir)
     }
-
-    setIsGenerating(true)
-    setResultText('')
-    resultTextRef.current = ''
-    setStatusMessage('正在启动...')
-    setProgressStage('checking')
-    setProgressMessage('正在启动...')
-    setProgressCurrent(undefined)
-    setProgressTotal(undefined)
-    setProgressIndeterminate(true)
 
     const params: Record<string, unknown> = {
       sessionId: selectedSession,
@@ -242,28 +217,32 @@ export default function CharacterPromptPage() {
       params.useBuiltinApi = true
     }
 
-    const result = await window.electronAPI.characterPrompt.generate(params as Parameters<typeof window.electronAPI.characterPrompt.generate>[0])
+    const result = await window.electronAPI.characterPrompt.generate(
+      params as Parameters<typeof window.electronAPI.characterPrompt.generate>[0]
+    )
 
     if (result.success && result.taskId) {
-      setTaskId(result.taskId)
+      storeStartTask(result.taskId)
     } else {
-      setStatusMessage(`启动失败: ${result.error}`)
-      setIsGenerating(false)
+      storeErrorTask(result.error || '启动失败')
     }
-  }, [selectedSession, selectedMembers, apiMode, apiProvider, apiUrl, apiKey, apiModel, remainingUses])
+  }, [selectedSession, selectedMembers, apiMode, apiProvider, apiUrl, apiKey, apiModel, remainingUses, exportDir, storeSetStatus, storeStartTask, storeErrorTask])
 
   const handleStop = useCallback(() => {
     if (taskId) {
       window.electronAPI.characterPrompt.stop(taskId)
-      setIsGenerating(false)
-      setStatusMessage('已取消')
+      storeResetTask()
+      storeSetStatus('已取消')
     }
-  }, [taskId])
+  }, [taskId, storeResetTask, storeSetStatus])
+
+  const handlePause = useCallback(() => storeSetPaused(true), [storeSetPaused])
+  const handleResume = useCallback(() => storeSetPaused(false), [storeSetPaused])
 
   const handleCopy = useCallback(() => {
     if (resultText) {
       navigator.clipboard.writeText(resultText)
-      setStatusMessage('已复制到剪贴板')
+      storeSetStatus('已复制到剪贴板')
     }
   }, [resultText])
 
@@ -279,9 +258,9 @@ export default function CharacterPromptPage() {
     if (!result.canceled && result.filePath) {
       const writeResult = await window.electronAPI.characterPrompt.saveFile(result.filePath, resultText)
       if (writeResult.success) {
-        setStatusMessage('已导出到 ' + result.filePath)
+        storeSetStatus('已导出到 ' + result.filePath)
       } else {
-        setStatusMessage('导出失败: ' + (writeResult.error || ''))
+        storeSetStatus('导出失败: ' + (writeResult.error || ''))
       }
     }
   }, [resultText, currentTarget])
@@ -456,19 +435,17 @@ export default function CharacterPromptPage() {
             {apiMode === 'redeem' && remainingUses > 0 && ` (${remainingUses})`}
           </button>
         ) : null}
-        {!isGenerating && statusMessage && (
-          statusMessage.startsWith('错误') ? (
-            <details className="error-box">
-              <summary>生成失败，点击展开详情</summary>
-              <pre>{statusMessage}</pre>
-            </details>
-          ) : (
-            <span className="status-text">{statusMessage}</span>
-          )
-        )}
+        {!isGenerating && errorMessage ? (
+          <details className="error-box">
+            <summary>生成失败，点击展开详情</summary>
+            <pre>{errorMessage}</pre>
+          </details>
+        ) : (!isGenerating && statusMessage && (
+          <span className="status-text">{statusMessage}</span>
+        ))}
       </div>
 
-      {/* 生成进度（带进度条 + 停止按钮） */}
+      {/* 生成进度（带进度条 + 暂停/继续/停止 按钮） */}
       <GenerationProgress
         visible={isGenerating}
         stage={progressStage}
@@ -478,7 +455,11 @@ export default function CharacterPromptPage() {
         indeterminate={progressIndeterminate}
         targetName={currentTarget}
         streamedChars={resultText.length}
+        paused={isPaused}
+        bufferedChars={pendingBufferLen}
         onStop={handleStop}
+        onPause={handlePause}
+        onResume={handleResume}
       />
 
       {/* 结果展示 */}
