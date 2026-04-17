@@ -44,14 +44,52 @@ export function getBuiltinAiConfig(): BuiltinAiConfig {
 
 /**
  * 拼接 API URL，智能补 /v1 版本段
+ *
+ * 规则：仅当 base 已经以 /v\d+ 结尾（如 `.../v1`）时跳过补版本；
+ * 其余情况（包括 `.../api`、`.../api/anthropic` 这类供应商代理前缀）一律补 `/v1`。
+ * 例：
+ *   https://api.anthropic.com              → https://api.anthropic.com/v1/messages
+ *   https://api.openai.com/v1              → https://api.openai.com/v1/chat/completions
+ *   https://open.bigmodel.cn/api/anthropic → https://open.bigmodel.cn/api/anthropic/v1/messages
  */
 export function buildAiApiUrl(baseUrl: string, path: string): string {
   let base = baseUrl.replace(/\/+$/, '')
-  if (!/\/v\d+$/.test(base) && !/\/(openai|anthropic|api)/i.test(base)) {
+  if (!/\/v\d+$/.test(base)) {
     base = `${base}/v1`
   }
   const suffix = path.startsWith('/') ? path : `/${path}`
   return `${base}${suffix}`
+}
+
+/**
+ * 识别供应商代理在 HTTP 200 外壳里塞的业务错误包。
+ * 典型形如 `{code:500, success:false, msg:"404 NOT_FOUND"}`（智谱网关）、
+ * `{error:{message:"..."}}`（OpenAI）、`{error:"..."}`（通用）。
+ * 命中时返回错误文案，否则返回空串。
+ */
+function extractBizError(parsed: unknown): string {
+  if (!parsed || typeof parsed !== 'object') return ''
+  const p = parsed as Record<string, unknown>
+  const codeIsError = typeof p.code === 'number' && (p.code as number) >= 400
+  const successFalse = p.success === false || p.ok === false
+  const hasErrorField = typeof p.error !== 'undefined' && p.error !== null
+
+  if (!codeIsError && !successFalse && !hasErrorField) return ''
+
+  const pickString = (v: unknown): string => (typeof v === 'string' ? v : '')
+  const errObj = p.error as Record<string, unknown> | string | undefined
+  const candidates: string[] = [
+    pickString(p.msg),
+    pickString(p.message),
+    typeof errObj === 'string' ? errObj : pickString(errObj?.message as unknown)
+  ].filter(Boolean)
+
+  if (candidates.length > 0) return candidates[0]
+  try {
+    return JSON.stringify(parsed).slice(0, 300)
+  } catch {
+    return ''
+  }
 }
 
 class SSEParser {
@@ -219,6 +257,16 @@ export function callAiStream(opts: CallAiOptions): Promise<void> {
         if (!receivedAnyChunk && rawBuffer) {
           try {
             const parsed = JSON.parse(rawBuffer)
+
+            // 业务错误识别：部分供应商代理在上游失败时会返回 HTTP 200 +
+            // {success:false, code, msg} 之类的业务错误包（如智谱 Anthropic 网关）。
+            // 需要在此优先识别，把真实错误信息透传给用户。
+            const bizErrorMsg = extractBizError(parsed)
+            if (bizErrorMsg) {
+              reject(new Error(`上游返回错误：${bizErrorMsg}`))
+              return
+            }
+
             let content = ''
             if (config.provider === 'anthropic') {
               if (Array.isArray(parsed?.content)) {
@@ -424,9 +472,32 @@ export function testAiConnection(config: AiConfig): Promise<AiTestResult> {
           return
         }
 
-        // 2xx 响应：尝试解析 content
+        // 2xx 响应：先识别"HTTP 200 外壳 + 业务错误体"的代理包
         try {
           const parsed = JSON.parse(raw)
+
+          const bizErrorMsg = extractBizError(parsed)
+          if (bizErrorMsg) {
+            // 根据错误文本智能分类
+            let kind: TestErrorKind = 'http'
+            if (/404|not.*found|model.*(not.*exist|invalid|unknown)/i.test(bizErrorMsg)) {
+              kind = 'model_not_found'
+            } else if (/401|403|auth|unauthoriz|forbidden/i.test(bizErrorMsg)) {
+              kind = 'auth'
+            } else if (/429|rate.*limit|too.*many/i.test(bizErrorMsg)) {
+              kind = 'rate_limit'
+            }
+            resolve({
+              success: false,
+              latencyMs,
+              statusCode,
+              errorKind: kind,
+              errorMessage: `上游返回错误：${bizErrorMsg.slice(0, 200)}`,
+              rawSnippet
+            })
+            return
+          }
+
           let reply = ''
           let returnedModel: string | undefined
 
