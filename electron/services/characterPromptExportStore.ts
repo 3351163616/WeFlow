@@ -156,14 +156,16 @@ class CharacterPromptExportStore {
         stage: 'reading',
         message: '命中磁盘缓存，正在读取...',
         current: 0,
-        total: dbCount
+        total: dbCount,
+        indeterminate: false
       })
       const messages = this.readJsonl(jsonl, (loaded) => {
         onProgress?.({
           stage: 'reading',
           message: `正在从磁盘读取聊天记录...`,
           current: loaded,
-          total: dbCount
+          total: dbCount,
+          indeterminate: false
         })
       })
       return { messages, hitKind: 'full', meta: oldMeta, path: jsonl }
@@ -176,14 +178,16 @@ class CharacterPromptExportStore {
         stage: 'reading',
         message: `读取已缓存消息并追加 ${delta} 条新消息...`,
         current: 0,
-        total: dbCount
+        total: dbCount,
+        indeterminate: false
       })
       const existing = this.readJsonl(jsonl, (loaded) => {
         onProgress?.({
           stage: 'reading',
           message: `正在从磁盘读取已缓存消息...`,
           current: loaded,
-          total: oldMeta.messageCount
+          total: oldMeta.messageCount,
+          indeterminate: false
         })
       })
       const newMessages = await this.loadFromDB(sessionId, oldMeta.messageCount, delta, (loaded) => {
@@ -191,7 +195,8 @@ class CharacterPromptExportStore {
           stage: 'appending',
           message: `正在追加新消息到磁盘...`,
           current: oldMeta.messageCount + loaded,
-          total: dbCount
+          total: dbCount,
+          indeterminate: false
         })
       }, signal)
       this.appendJsonl(jsonl, newMessages)
@@ -213,14 +218,16 @@ class CharacterPromptExportStore {
       stage: 'exporting',
       message: `正在从数据库全量导出聊天记录...`,
       current: 0,
-      total: dbCount
+      total: dbCount,
+      indeterminate: false
     })
     const allMessages = await this.loadFromDB(sessionId, 0, dbCount, (loaded) => {
       onProgress?.({
         stage: 'exporting',
         message: `正在从数据库导出聊天记录...`,
         current: loaded,
-        total: dbCount
+        total: dbCount,
+        indeterminate: false
       })
     }, signal)
     this.writeJsonl(jsonl, allMessages)

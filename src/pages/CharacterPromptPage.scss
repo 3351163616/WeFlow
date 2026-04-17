@@ -774,3 +774,50 @@
   from { opacity: 0; transform: translateY(-3px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* ─── 智能粘底 + 跳到最新浮动按钮 ───────────────────────── */
+.character-prompt-page .result-section {
+  .result-content-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .jump-to-bottom-btn {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 18px;
+    border: 1px solid var(--border-strong);
+    background: var(--primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(var(--primary-rgb), 0.35);
+    transition: all 0.15s;
+    animation: cp-jump-in 0.2s ease-out;
+    z-index: 3;
+
+    &:hover {
+      background: var(--primary-hover);
+      transform: translateX(-50%) translateY(-1px);
+      box-shadow: 0 6px 18px rgba(var(--primary-rgb), 0.45);
+    }
+    &:active {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+@keyframes cp-jump-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}

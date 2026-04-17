@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Sparkles, Copy, Download, Loader2, KeyRound, Plug } from 'lucide-react'
+import { Sparkles, Copy, Download, Loader2, KeyRound, Plug, ArrowDownToLine } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { SessionPicker } from '../components/SessionPicker'
@@ -85,6 +85,9 @@ export default function CharacterPromptPage() {
   const storeErrorTask = useCharacterPromptStore(s => s.errorTask)
 
   const resultRef = useRef<HTMLDivElement>(null)
+  // 智能粘底：用户是否主动脱离底部
+  const stickToBottomRef = useRef(true)
+  const [isStuckToBottom, setIsStuckToBottom] = useState(true)
 
   // 持久化 API 配置
   useEffect(() => { localStorage.setItem(STORAGE_KEY_MODE, apiMode) }, [apiMode])
@@ -140,12 +143,41 @@ export default function CharacterPromptPage() {
   }, [selectedSession])
 
   // IPC 监听已在 App 根部全局注册（initCharacterPromptListeners），无需在此订阅
-  // 结果区域滚动到底（基于 resultText 变化）
+  // 结果区域智能粘底：仅当用户处于底部 30px 以内时才自动滚动
   useEffect(() => {
-    requestAnimationFrame(() => {
-      if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight
-    })
+    if (stickToBottomRef.current && resultRef.current) {
+      requestAnimationFrame(() => {
+        if (resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight
+      })
+    }
   }, [resultText])
+
+  // 监听滚动，判断是否仍粘底
+  const handleResultScroll = useCallback(() => {
+    const el = resultRef.current
+    if (!el) return
+    const threshold = 30
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    const atBottom = distanceFromBottom <= threshold
+    stickToBottomRef.current = atBottom
+    setIsStuckToBottom(atBottom)
+  }, [])
+
+  const handleJumpToBottom = useCallback(() => {
+    const el = resultRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    stickToBottomRef.current = true
+    setIsStuckToBottom(true)
+  }, [])
+
+  // 新生成开始时默认重置为粘底
+  useEffect(() => {
+    if (isGenerating && resultText === '') {
+      stickToBottomRef.current = true
+      setIsStuckToBottom(true)
+    }
+  }, [isGenerating, resultText])
 
   // 兑换码提交
   const handleRedeem = useCallback(async () => {
@@ -506,13 +538,26 @@ export default function CharacterPromptPage() {
             </div>
           )}
         </div>
-        <div className="result-content" ref={resultRef}>
-          {resultText ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{resultText}</ReactMarkdown>
-          ) : (
-            <div className="placeholder">
-              选择会话和目标成员，点击"生成角色提示词"开始
-            </div>
+        <div className="result-content-wrap">
+          <div className="result-content" ref={resultRef} onScroll={handleResultScroll}>
+            {resultText ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{resultText}</ReactMarkdown>
+            ) : (
+              <div className="placeholder">
+                选择会话和目标成员，点击"生成角色提示词"开始
+              </div>
+            )}
+          </div>
+          {isGenerating && !isStuckToBottom && resultText && (
+            <button
+              type="button"
+              className="jump-to-bottom-btn"
+              onClick={handleJumpToBottom}
+              title="跳到最新"
+            >
+              <ArrowDownToLine size={14} />
+              跳到最新
+            </button>
           )}
         </div>
       </div>

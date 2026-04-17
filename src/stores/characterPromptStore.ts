@@ -116,15 +116,28 @@ export const useCharacterPromptStore = create<CharacterPromptState & CharacterPr
   },
 
   setProgress: (payload) => {
-    set((prev) => ({
-      progressStage: payload.stage ?? prev.progressStage,
-      progressMessage: payload.message ?? prev.progressMessage,
-      progressCurrent: 'current' in payload ? payload.current : prev.progressCurrent,
-      progressTotal: 'total' in payload ? payload.total : prev.progressTotal,
-      progressIndeterminate: payload.indeterminate ?? prev.progressIndeterminate,
-      currentTarget: payload.targetName || prev.currentTarget,
-      statusMessage: payload.message ?? prev.statusMessage
-    }))
+    set((prev) => {
+      const hasCurrent = 'current' in payload
+      const hasTotal = 'total' in payload
+      // 若明确传了 indeterminate 优先用之；否则根据是否有数字化 current/total 推断
+      let nextIndeterminate: boolean
+      if ('indeterminate' in payload) {
+        nextIndeterminate = !!payload.indeterminate
+      } else if (hasCurrent && hasTotal && typeof payload.current === 'number' && typeof payload.total === 'number' && payload.total > 0) {
+        nextIndeterminate = false
+      } else {
+        nextIndeterminate = prev.progressIndeterminate
+      }
+      return {
+        progressStage: payload.stage ?? prev.progressStage,
+        progressMessage: payload.message ?? prev.progressMessage,
+        progressCurrent: hasCurrent ? payload.current : prev.progressCurrent,
+        progressTotal: hasTotal ? payload.total : prev.progressTotal,
+        progressIndeterminate: nextIndeterminate,
+        currentTarget: payload.targetName || prev.currentTarget,
+        statusMessage: payload.message ?? prev.statusMessage
+      }
+    })
   },
 
   setRemainingUses: (n) => set({ remainingUses: n }),
