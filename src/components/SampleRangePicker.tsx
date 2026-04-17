@@ -8,7 +8,7 @@ const PRESETS = [10, 25, 50, 75, 100] as const
 const FORCE_FULL_THRESHOLD = 50
 /** 超过此条数提示"可能撑爆 Prompt" */
 const DEFAULT_BUDGET = 5000
-/** 默认档位：min(25%, 2000) 的依据见需求说明 */
+/** 默认档位保留常量以兼容历史逻辑（当前默认改为 100%，不再使用上限） */
 const DEFAULT_CAP = 2000
 
 export interface SampleRangePickerProps {
@@ -28,11 +28,10 @@ export function calcSampleSize(totalCount: number, percent: number): number {
   return Math.max(1, Math.round(totalCount * percent / 100))
 }
 
-/** 计算默认采样条数：min(25%, 2000) 与总数的下界 */
+/** 计算默认采样条数：默认 100% 全量，用户可自行降档 */
 export function defaultSampleSize(totalCount: number): number {
   if (totalCount <= 0) return 0
-  if (totalCount < FORCE_FULL_THRESHOLD) return totalCount
-  return Math.min(Math.round(totalCount * 0.25), DEFAULT_CAP)
+  return totalCount
 }
 
 /** 判断一个条数是否等于某个预设百分比（容差 1 条） */
