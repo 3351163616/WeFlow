@@ -17,8 +17,30 @@ export interface StyleContrastContext {
     firstMessageTime?: number | null
     lastMessageTime?: number | null
     activeDays?: number
+    /** A（我）回复 B 的中位延迟（秒），反映"谁在等谁" */
+    medianReplyDelaySelf?: number | null
+    /** B 回复 A 的中位延迟（秒） */
+    medianReplyDelayOther?: number | null
+    /** 23:00 - 06:00 消息占比（0–1） */
+    nightRatio?: number
+    /** 新对话由 A 发起的比例（0–1） */
+    selfInitiatorRatio?: number
+    /** 参与发起者统计的对话轮数样本量 */
+    initiatorSampleSize?: number
   }
   sampleMessages: string  // 已 A/B 标签化的消息样本
+}
+
+function formatDelaySeconds(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined) return '样本不足'
+  if (sec < 60) return `${sec} 秒`
+  if (sec < 3600) return `${(sec / 60).toFixed(1)} 分钟`
+  return `${(sec / 3600).toFixed(1)} 小时`
+}
+
+function formatRatio(ratio: number | undefined): string {
+  if (ratio === undefined || ratio === null) return '—'
+  return `${Math.round(ratio * 100)}%`
 }
 
 export function buildStyleContrastPrompt(ctx: StyleContrastContext): string {
@@ -31,7 +53,7 @@ export function buildStyleContrastPrompt(ctx: StyleContrastContext): string {
 
 【统计摘要】
 - 对话区间：${period}
-- 总消息：${stats.totalMessages} 条
+- 采样总消息：${stats.totalMessages} 条
 - A（${ctx.selfName}）发送：${stats.selfCount} 条
 - B（${ctx.otherName}）发送：${stats.otherCount} 条
 ${stats.activeDays ? `- 活跃天数：${stats.activeDays} 天` : ''}
@@ -39,6 +61,10 @@ ${stats.textMessages ? `- 文本消息：${stats.textMessages}` : ''}
 ${stats.imageMessages ? `- 图片消息：${stats.imageMessages}` : ''}
 ${stats.voiceMessages ? `- 语音消息：${stats.voiceMessages}` : ''}
 ${stats.emojiMessages ? `- 表情消息：${stats.emojiMessages}` : ''}
+- A 回复 B 的中位延迟：${formatDelaySeconds(stats.medianReplyDelaySelf)}
+- B 回复 A 的中位延迟：${formatDelaySeconds(stats.medianReplyDelayOther)}
+- 夜聊占比（23-06 点）：${formatRatio(stats.nightRatio)}
+- 新对话由 A 发起比例：${formatRatio(stats.selfInitiatorRatio)}${stats.initiatorSampleSize ? `（基于 ${stats.initiatorSampleSize} 轮对话）` : ''}
 
 【消息样本（A = ${ctx.selfName}，B = ${ctx.otherName}）】
 ${ctx.sampleMessages}
