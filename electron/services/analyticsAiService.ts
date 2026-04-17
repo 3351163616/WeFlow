@@ -8,7 +8,6 @@ import { buildStyleContrastPrompt } from './analyticsAiTemplate'
 import type { Message } from './chatService'
 
 const SKIP_LOCAL_TYPES = new Set([10000, 42, 48])
-const STYLE_CONTRAST_TEMPERATURE = 0.6
 /** 默认采样条数（当前端未传 sampleSize 时使用） */
 const TARGET_SAMPLE_SIZE = 600
 /** 1 次会话的间隔阈值（秒）：> 该值视为"对话重启"，下条消息的发送者视为本轮发起者 */
@@ -243,11 +242,12 @@ class AnalyticsAiService {
       })
 
       let fullText = ''
+      // 请求参数与"角色提示词"对齐（max_tokens=16384、不传 temperature），
+      // 以规避部分 AI 代理网关在 stream + temperature 组合下返回 503 的已知兼容问题。
       await callAiStream({
         config,
         prompt,
-        maxTokens: 6000,
-        temperature: STYLE_CONTRAST_TEMPERATURE,
+        maxTokens: 16384,
         onChunk: (chunk) => {
           fullText += chunk
           this.broadcast('analyticsAi:chunk', { taskId, chunk })
