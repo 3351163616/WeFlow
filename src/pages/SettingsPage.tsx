@@ -3469,36 +3469,38 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
               </div>
             </div>
 
-            <div className="log-toggle-line" style={{ marginBottom: 12 }}>
-              <span className="log-status" style={{ fontWeight: 600 }}>
-                {aiInsightFilterMode === 'whitelist'
-                  ? '白名单模式（仅对名单内会话生效）'
-                  : '黑名单模式（名单内会话将被忽略）'}
-              </span>
-              <div className="custom-select" style={{ minWidth: 210 }}>
-                <div
-                  className={`custom-select-trigger ${insightFilterModeDropdownOpen ? 'open' : ''}`}
-                  onClick={() => setInsightFilterModeDropdownOpen(!insightFilterModeDropdownOpen)}
-                >
-                  <span className="custom-select-value">
-                    {aiInsightFilterMode === 'whitelist' ? '白名单模式' : '黑名单模式'}
-                  </span>
-                  <ChevronDown size={14} className={`custom-select-arrow ${insightFilterModeDropdownOpen ? 'rotate' : ''}`} />
-                </div>
-                <div className={`custom-select-dropdown ${insightFilterModeDropdownOpen ? 'open' : ''}`}>
-                  {[
-                    { value: 'whitelist', label: '白名单模式' },
-                    { value: 'blacklist', label: '黑名单模式' }
-                  ].map(option => (
-                    <div
-                      key={option.value}
-                      className={`custom-select-option ${aiInsightFilterMode === option.value ? 'selected' : ''}`}
-                      onClick={() => { void saveFilterMode(option.value as configService.AiInsightFilterMode) }}
-                    >
-                      {option.label}
-                      {aiInsightFilterMode === option.value && <Check size={14} />}
-                    </div>
-                  ))}
+            <div className="form-group" style={{ marginBottom: 12 }}>
+              <div className="log-toggle-line">
+                <span className="log-status" style={{ fontWeight: 600 }}>
+                  {aiInsightFilterMode === 'whitelist'
+                    ? '白名单模式（仅对名单内会话生效）'
+                    : '黑名单模式（名单内会话将被忽略）'}
+                </span>
+                <div className="custom-select" style={{ minWidth: 210 }}>
+                  <div
+                    className={`custom-select-trigger ${insightFilterModeDropdownOpen ? 'open' : ''}`}
+                    onClick={() => setInsightFilterModeDropdownOpen(!insightFilterModeDropdownOpen)}
+                  >
+                    <span className="custom-select-value">
+                      {aiInsightFilterMode === 'whitelist' ? '白名单模式' : '黑名单模式'}
+                    </span>
+                    <ChevronDown size={14} className={`custom-select-arrow ${insightFilterModeDropdownOpen ? 'rotate' : ''}`} />
+                  </div>
+                  <div className={`custom-select-dropdown ${insightFilterModeDropdownOpen ? 'open' : ''}`}>
+                    {[
+                      { value: 'whitelist', label: '白名单模式' },
+                      { value: 'blacklist', label: '黑名单模式' }
+                    ].map(option => (
+                      <div
+                        key={option.value}
+                        className={`custom-select-option ${aiInsightFilterMode === option.value ? 'selected' : ''}`}
+                        onClick={() => { void saveFilterMode(option.value as configService.AiInsightFilterMode) }}
+                      >
+                        {option.label}
+                        {aiInsightFilterMode === option.value && <Check size={14} />}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
