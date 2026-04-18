@@ -652,6 +652,12 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     void refreshWhisperStatus(whisperModelDir)
   }, [whisperModelDir])
 
+  const getErrorMessage = (error: any): string => {
+    const raw = typeof error?.message === 'string' ? error.message : String(error ?? '')
+    const normalized = raw.replace(/^Error:\s*/i, '').trim()
+    return normalized || '未知错误'
+  }
+
   const handleCheckUpdate = async () => {
     if (isCheckingUpdate) return
     setIsCheckingUpdate(true)
@@ -666,7 +672,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         showMessage('当前已是最新版', true)
       }
     } catch (e: any) {
-      showMessage(`检查更新失败: ${e}`, false)
+      showMessage(`检查更新失败: ${getErrorMessage(e)}`, false)
     } finally {
       setIsCheckingUpdate(false)
     }
@@ -681,7 +687,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       showMessage('正在下载更新...', true)
       await window.electronAPI.app.downloadAndInstall()
     } catch (e: any) {
-      showMessage(`更新失败: ${e}`, false)
+      showMessage(`更新失败: ${getErrorMessage(e)}`, false)
       setIsDownloading(false)
     }
   }

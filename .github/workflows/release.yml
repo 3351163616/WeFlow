@@ -43,7 +43,7 @@ jobs:
           npx tsc
           npx vite build
 
-      - name: Package and Publish macOS arm64 (unsigned DMG)
+      - name: Package and Publish macOS arm64 (unsigned DMG + ZIP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -51,7 +51,7 @@ jobs:
         run: |
           export ELECTRON_BUILDER_BINARIES_MIRROR="https://github.com/electron-userland/electron-builder-binaries/releases/download/"
           echo "Using ELECTRON_BUILDER_BINARIES_MIRROR=$ELECTRON_BUILDER_BINARIES_MIRROR"
-          npx electron-builder --mac dmg --arm64 --publish always
+          npx electron-builder --mac dmg zip --arm64 --publish always
 
       - name: Inject minimumVersion into latest yml
         env:

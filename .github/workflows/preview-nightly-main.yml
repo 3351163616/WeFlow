@@ -136,7 +136,7 @@ jobs:
         run: |
           export ELECTRON_BUILDER_BINARIES_MIRROR="https://github.com/electron-userland/electron-builder-binaries/releases/download/"
           echo "Using ELECTRON_BUILDER_BINARIES_MIRROR=$ELECTRON_BUILDER_BINARIES_MIRROR"
-          npx electron-builder --mac dmg --arm64 --publish never '--config.publish.channel=preview' '--config.artifactName=${productName}-preview-arm64.${ext}'
+          npx electron-builder --mac dmg zip --arm64 --publish never '--config.publish.channel=preview' '--config.artifactName=${productName}-preview-arm64.${ext}'
 
       - name: Upload macOS arm64 assets to fixed preview release
         env:

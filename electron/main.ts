@@ -1891,9 +1891,17 @@ function registerIpcHandlers() {
         downloadedHandler = null
       }
       
-      // 统一错误提示格式，避免出现 [object Object] 的 JSON 字符串
-      const errorMessage = error.message || (typeof error === 'string' ? error : JSON.stringify(error))
-      throw new Error(errorMessage)
+      const errorCode = typeof error?.code === 'string' ? error.code : ''
+      const rawErrorMessage =
+        typeof error?.message === 'string'
+          ? error.message
+          : (typeof error === 'string' ? error : JSON.stringify(error))
+
+      if (errorCode === 'ERR_UPDATER_ZIP_FILE_NOT_FOUND' || /ZIP file not provided/i.test(rawErrorMessage)) {
+        throw new Error('当前发布版本缺少 macOS 自动更新所需的 ZIP 包，请联系开发者重新发布该版本')
+      }
+
+      throw new Error(rawErrorMessage || '下载更新失败，请稍后重试')
     }
   })
 
