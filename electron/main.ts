@@ -1755,6 +1755,18 @@ function registerIpcHandlers() {
   ipcMain.handle('characterChat:clearConversation', async (_, contactId: string) => {
     return characterChatService.clearConversation(contactId)
   })
+  ipcMain.handle('characterChat:getIndexStatus', async (_, contactId: string) => {
+    return characterChatService.getIndexStatus(contactId)
+  })
+  ipcMain.handle('characterChat:buildIndex', async (_, contactId: string) => {
+    return characterChatService.buildIndex(contactId)
+  })
+  ipcMain.handle('characterChat:stopBuildIndex', async (_, contactId: string) => {
+    return characterChatService.stopBuildIndex(contactId)
+  })
+  ipcMain.handle('characterChat:deleteIndex', async (_, contactId: string) => {
+    return characterChatService.deleteIndex(contactId)
+  })
 
   // 年度报告 AI 叙事 / 标题
   ipcMain.handle('annualReportAi:generateNarration', async (_, params) => {

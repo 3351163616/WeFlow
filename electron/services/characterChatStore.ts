@@ -2,8 +2,10 @@
  * 模拟微信角色聊天 · 本地存储
  *
  * 持久化策略：JSON 文件 + JSONL 追加（不引入 better-sqlite3），路径约定：
- *   <userData>/characterChat/profiles/<safeContactId>.json        （角色画像）
- *   <userData>/characterChat/conversations/<safeContactId>.jsonl  （对话消息流，每行一条）
+ *   <userData>/characterChat/profiles/<safeContactId>.json            （角色画像）
+ *   <userData>/characterChat/conversations/<safeContactId>.jsonl      （对话消息流）
+ *   <userData>/characterChat/snippets/<safeContactId>.snippets.jsonl  （RAG 片段原文）
+ *   <userData>/characterChat/snippets/<safeContactId>.index.json      （BM25 倒排索引）
  *
  * MVP 阶段每个联系人仅一个默认会话；未来扩展多会话时可改为目录结构。
  */
@@ -60,7 +62,52 @@ export interface ChatMessage {
   createdAt: number
 }
 
+/**
+ * RAG snippet（连续多条消息合并后的原始片段）
+ * 保留首尾时间，便于注入 prompt 时附带时间上下文
+ */
+export interface CharacterSnippet {
+  id: string
+  /** A/B 标签格式的片段原文，如 "A: 你今天干嘛\nB: 在家睡觉\nA: 那我去找你" */
+  text: string
+  tokens: number
+  /** 首条消息时间（秒） */
+  timeStart: number
+  /** 尾条消息时间（秒） */
+  timeEnd: number
+  /** 包含的原始消息 localId 列表，便于回溯 */
+  messageLocalIds: Array<number | string>
+}
+
+/**
+ * BM25 倒排索引
+ * postings: term → [[snippetId, tf], ...]
+ */
+export interface CharacterSnippetIndex {
+  version: number
+  contactId: string
+  buildAt: number
+  totalSnippets: number
+  avgLength: number
+  /** 倒排表：term → 命中 snippet 的 (id, term frequency) */
+  postings: Record<string, Array<[string, number]>>
+  /** snippet 元数据：id → { length: 总 token 数 } */
+  snippetMeta: Record<string, { length: number }>
+  /** 构建时扫描的消息数（便于判断增量） */
+  sourceMessageCount: number
+}
+
+/** 索引状态（用于 UI 展示） */
+export interface CharacterIndexStatus {
+  exists: boolean
+  buildAt?: number
+  totalSnippets?: number
+  sourceMessageCount?: number
+  version?: number
+}
+
 const PROFILE_VERSION = 1
+export const INDEX_VERSION = 1
 
 function getStoreRoot(): string {
   return join(app.getPath('userData'), 'characterChat')
@@ -72,6 +119,10 @@ function getProfilesDir(): string {
 
 function getConversationsDir(): string {
   return join(getStoreRoot(), 'conversations')
+}
+
+function getSnippetsDir(): string {
+  return join(getStoreRoot(), 'snippets')
 }
 
 /**
@@ -91,9 +142,18 @@ function getConversationPath(contactId: string): string {
   return join(getConversationsDir(), `${safeFileName(contactId)}.jsonl`)
 }
 
+function getSnippetsPath(contactId: string): string {
+  return join(getSnippetsDir(), `${safeFileName(contactId)}.snippets.jsonl`)
+}
+
+function getIndexPath(contactId: string): string {
+  return join(getSnippetsDir(), `${safeFileName(contactId)}.index.json`)
+}
+
 async function ensureDirs(): Promise<void> {
   await mkdir(getProfilesDir(), { recursive: true })
   await mkdir(getConversationsDir(), { recursive: true })
+  await mkdir(getSnippetsDir(), { recursive: true })
 }
 
 export const characterChatStore = {
@@ -227,6 +287,87 @@ export const characterChatStore = {
       return raw.split('\n').filter(l => l.trim()).length
     } catch {
       return 0
+    }
+  },
+
+  // ─── RAG 索引存储 ─────────────────────────────────────────────────────
+
+  getSnippetsPath,
+  getIndexPath,
+
+  /** 写 snippets.jsonl（整体覆盖，不增量追加） */
+  async writeSnippets(contactId: string, snippets: CharacterSnippet[]): Promise<void> {
+    await ensureDirs()
+    const p = getSnippetsPath(contactId)
+    const body = snippets.map(s => JSON.stringify(s)).join('\n') + (snippets.length > 0 ? '\n' : '')
+    await writeFile(p, body, 'utf-8')
+  },
+
+  /** 读全部 snippets */
+  async readSnippets(contactId: string): Promise<CharacterSnippet[]> {
+    const p = getSnippetsPath(contactId)
+    if (!existsSync(p)) return []
+    try {
+      const raw = await readFile(p, 'utf-8')
+      const lines = raw.split('\n').filter(l => l.trim())
+      const out: CharacterSnippet[] = []
+      for (const line of lines) {
+        try {
+          const s = JSON.parse(line) as CharacterSnippet
+          if (s && s.id && typeof s.text === 'string') out.push(s)
+        } catch {
+          /* 跳过损坏行 */
+        }
+      }
+      return out
+    } catch {
+      return []
+    }
+  },
+
+  async writeIndex(index: CharacterSnippetIndex): Promise<void> {
+    await ensureDirs()
+    const p = getIndexPath(index.contactId)
+    await writeFile(p, JSON.stringify(index), 'utf-8')
+  },
+
+  async readIndex(contactId: string): Promise<CharacterSnippetIndex | null> {
+    const p = getIndexPath(contactId)
+    if (!existsSync(p)) return null
+    try {
+      const raw = await readFile(p, 'utf-8')
+      const data = JSON.parse(raw) as CharacterSnippetIndex
+      if (!data.contactId || !data.postings) return null
+      return data
+    } catch {
+      return null
+    }
+  },
+
+  async deleteIndex(contactId: string): Promise<boolean> {
+    const idxPath = getIndexPath(contactId)
+    const snipPath = getSnippetsPath(contactId)
+    let removed = false
+    if (existsSync(idxPath)) { await unlink(idxPath); removed = true }
+    if (existsSync(snipPath)) { await unlink(snipPath); removed = true }
+    return removed
+  },
+
+  async getIndexStatus(contactId: string): Promise<CharacterIndexStatus> {
+    const p = getIndexPath(contactId)
+    if (!existsSync(p)) return { exists: false }
+    try {
+      const raw = await readFile(p, 'utf-8')
+      const data = JSON.parse(raw) as CharacterSnippetIndex
+      return {
+        exists: true,
+        buildAt: data.buildAt,
+        totalSnippets: data.totalSnippets,
+        sourceMessageCount: data.sourceMessageCount,
+        version: data.version
+      }
+    } catch {
+      return { exists: false }
     }
   }
 }

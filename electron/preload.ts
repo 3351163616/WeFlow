@@ -646,6 +646,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('characterChat:loadMessages', contactId),
     clearConversation: (contactId: string) =>
       ipcRenderer.invoke('characterChat:clearConversation', contactId),
+    getIndexStatus: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:getIndexStatus', contactId),
+    buildIndex: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:buildIndex', contactId),
+    stopBuildIndex: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:stopBuildIndex', contactId),
+    deleteIndex: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:deleteIndex', contactId),
     onProgress: (callback: (payload: {
       taskId: string
       phase: 'loading' | 'formatting' | 'generating' | 'saving' | 'done'
@@ -683,6 +691,29 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onReplyError: (callback: (payload: { contactId: string; error: string }) => void) => {
       ipcRenderer.on('characterChat:replyError', (_, payload) => callback(payload))
       return () => ipcRenderer.removeAllListeners('characterChat:replyError')
+    },
+    onIndexProgress: (callback: (payload: {
+      contactId: string
+      phase: 'loading' | 'segmenting' | 'indexing' | 'writing' | 'done'
+      message: string
+      current?: number
+      total?: number
+      indeterminate?: boolean
+    }) => void) => {
+      ipcRenderer.on('characterChat:indexProgress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:indexProgress')
+    },
+    onIndexComplete: (callback: (payload: {
+      contactId: string
+      snippetCount: number
+      sourceMessageCount: number
+    }) => void) => {
+      ipcRenderer.on('characterChat:indexComplete', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:indexComplete')
+    },
+    onIndexError: (callback: (payload: { contactId: string; error: string }) => void) => {
+      ipcRenderer.on('characterChat:indexError', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:indexError')
     }
   },
   annualReportAi: {

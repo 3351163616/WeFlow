@@ -39,6 +39,24 @@ export interface ChatMessage {
   createdAt: number
 }
 
+export interface IndexStatus {
+  exists: boolean
+  buildAt?: number
+  totalSnippets?: number
+  sourceMessageCount?: number
+  version?: number
+}
+
+export type IndexPhase = 'loading' | 'segmenting' | 'indexing' | 'writing' | 'done'
+
+export interface IndexProgress {
+  phase: IndexPhase
+  message: string
+  current?: number
+  total?: number
+  indeterminate?: boolean
+}
+
 interface CharacterChatState {
   // 当前生成任务
   taskId: string
@@ -76,6 +94,12 @@ interface CharacterChatState {
   /** 最近一次回复错误 */
   replyError: Record<string, string>
 
+  // ── RAG 索引状态（里程碑 3） ──
+  indexStatus: Record<string, IndexStatus>
+  indexBuilding: Record<string, boolean>
+  indexProgress: Record<string, IndexProgress>
+  indexError: Record<string, string>
+
   // 监听器标志
   listenersAttached: boolean
 }
@@ -109,6 +133,13 @@ interface CharacterChatActions {
   clearReply: (contactId: string) => void
   clearConversation: (contactId: string) => void
 
+  // 索引 actions
+  setIndexStatus: (contactId: string, status: IndexStatus) => void
+  startIndexBuild: (contactId: string) => void
+  setIndexProgress: (contactId: string, progress: IndexProgress) => void
+  finishIndexBuild: (contactId: string, snippetCount: number, sourceMessageCount: number) => void
+  setIndexError: (contactId: string, error: string) => void
+
   markListenersAttached: () => void
 }
 
@@ -132,6 +163,10 @@ const INITIAL_STATE: CharacterChatState = {
   replyStreamingText: {},
   isReplying: {},
   replyError: {},
+  indexStatus: {},
+  indexBuilding: {},
+  indexProgress: {},
+  indexError: {},
   listenersAttached: false
 }
 
@@ -303,6 +338,57 @@ export const useCharacterChatStore = create<CharacterChatState & CharacterChatAc
     })
   },
 
+  // ── 索引 actions ──
+  setIndexStatus: (contactId, status) => {
+    const state = get()
+    set({ indexStatus: { ...state.indexStatus, [contactId]: status } })
+  },
+
+  startIndexBuild: (contactId) => {
+    const state = get()
+    set({
+      indexBuilding: { ...state.indexBuilding, [contactId]: true },
+      indexError: { ...state.indexError, [contactId]: '' },
+      indexProgress: {
+        ...state.indexProgress,
+        [contactId]: { phase: 'loading', message: '准备中…', indeterminate: true }
+      }
+    })
+  },
+
+  setIndexProgress: (contactId, progress) => {
+    const state = get()
+    set({ indexProgress: { ...state.indexProgress, [contactId]: progress } })
+  },
+
+  finishIndexBuild: (contactId, snippetCount, sourceMessageCount) => {
+    const state = get()
+    set({
+      indexBuilding: { ...state.indexBuilding, [contactId]: false },
+      indexStatus: {
+        ...state.indexStatus,
+        [contactId]: {
+          exists: true,
+          buildAt: Date.now(),
+          totalSnippets: snippetCount,
+          sourceMessageCount
+        }
+      },
+      indexProgress: {
+        ...state.indexProgress,
+        [contactId]: { phase: 'done', message: `已索引 ${snippetCount} 个片段` }
+      }
+    })
+  },
+
+  setIndexError: (contactId, error) => {
+    const state = get()
+    set({
+      indexBuilding: { ...state.indexBuilding, [contactId]: false },
+      indexError: { ...state.indexError, [contactId]: error }
+    })
+  },
+
   markListenersAttached: () => set({ listenersAttached: true })
 }))
 
@@ -371,5 +457,32 @@ export function initCharacterChatListeners() {
 
   api.onReplyError((payload) => {
     useCharacterChatStore.getState().setReplyError(payload.contactId, payload.error)
+  })
+
+  api.onIndexProgress((payload) => {
+    useCharacterChatStore.getState().setIndexProgress(payload.contactId, {
+      phase: payload.phase,
+      message: payload.message,
+      current: payload.current,
+      total: payload.total,
+      indeterminate: payload.indeterminate
+    })
+    // 首次收到进度 → 标记构建中
+    const st = useCharacterChatStore.getState()
+    if (!st.indexBuilding[payload.contactId]) {
+      st.startIndexBuild(payload.contactId)
+    }
+  })
+
+  api.onIndexComplete((payload) => {
+    useCharacterChatStore.getState().finishIndexBuild(
+      payload.contactId,
+      payload.snippetCount,
+      payload.sourceMessageCount
+    )
+  })
+
+  api.onIndexError((payload) => {
+    useCharacterChatStore.getState().setIndexError(payload.contactId, payload.error)
   })
 }

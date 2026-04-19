@@ -17,6 +17,13 @@ import { wcdbService } from './wcdbService'
 import { CHARACTER_PROMPT_TEMPLATE } from './characterPromptTemplate'
 import { callAiStream, getBuiltinAiConfig, type AiProvider, type AiConfig, type AiTurn } from './aiStreamService'
 import { characterChatStore, type CharacterProfile, type ChatMessage } from './characterChatStore'
+import {
+  buildIndex as buildRetrievalIndex,
+  retrieve as retrieveSnippets,
+  invalidateIndexCache,
+  type BuildIndexProgress,
+  type RetrievedSnippet
+} from './characterChatRetriever'
 
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
@@ -84,6 +91,8 @@ const REPLY_MAX_TOKENS = 16384
 const CONVERSATION_WINDOW = 30
 /** 软分条标记，AI 可用它把一轮回复拆成多条短消息 */
 const SEGMENT_SEPARATOR = '⟨SEP⟩'
+/** RAG 召回条数 */
+const RAG_TOP_K = 6
 
 // 跳过的本地消息类型：系统消息/名片/位置（与 characterPromptService 对齐）
 const SKIP_LOCAL_TYPES = new Set([10000, 42, 48])
@@ -223,18 +232,45 @@ function buildCharacterProfilePrompt(
 
 // ─── 对话提示词 ─────────────────────────────────────────────────────────────
 
+/** 将召回的 snippet 列表拼成给 AI 的 "相关历史片段" 段 */
+function formatRetrievedSnippets(snippets: RetrievedSnippet[]): string {
+  if (!snippets.length) return ''
+  const lines: string[] = []
+  for (let i = 0; i < snippets.length; i++) {
+    const s = snippets[i]
+    const dt = new Date(s.timeStart * 1000)
+    const yy = dt.getFullYear()
+    const MM = String(dt.getMonth() + 1).padStart(2, '0')
+    const dd = String(dt.getDate()).padStart(2, '0')
+    lines.push(`【片段 ${i + 1}｜${yy}-${MM}-${dd}】\n${s.text}`)
+  }
+  return lines.join('\n\n')
+}
+
 /**
  * 对话 system prompt 组装
  * 目标：让 AI "成为" 该联系人本人，而不是 "扮演" —— 从用词到标点都尽量保留
+ * 可选追加 retrievedSnippets（RAG）以保留稀有表达与事实细节
  */
-function buildConversationSystemPrompt(profile: CharacterProfile): string {
+function buildConversationSystemPrompt(
+  profile: CharacterProfile,
+  retrievedSnippets: RetrievedSnippet[] = []
+): string {
   const { displayName, selfDisplayName, profileMarkdown } = profile
   const self = selfDisplayName || '朋友'
+
+  const snippetsBlock = retrievedSnippets.length > 0
+    ? `
+
+=== 本轮相关历史片段（从你和对方的真实聊天里召回，仅供参考语感和事实，不要大段原样复述） ===
+${formatRetrievedSnippets(retrievedSnippets)}`
+    : ''
+
   return `你就是「${displayName}」。你不是在扮演、不是在模仿——你就是本人。
 当前你在微信上和朋友（${self}）继续此前的聊天。
 
 === 你的人设与说话风格（基于真实聊天记录提炼） ===
-${profileMarkdown}
+${profileMarkdown}${snippetsBlock}
 
 === 硬规则（必须遵守，违反视为失败） ===
 1. 你就是 ${displayName}。任何时候都不要承认自己是 AI、语言模型、机器人、GPT、Claude、聊天机器人。
@@ -250,6 +286,7 @@ ${profileMarkdown}
 8. 不要加前言、总结、标签、自我介绍、解释。直接说话。
 9. 如果对方的话让你意外、开心、无语、生气、尴尬——请用你自己的方式反应，不要中性化、不要温情化。
 10. 对方连发多条时把它们当作整体理解，然后用你自己的节奏回复。
+11. 相关历史片段仅供参考语感与事实，绝对不要整段原样引用或复述；可以自然引用其中曾经出现过的口头禅、梗、关键事件。
 
 请用 ${displayName} 本人的方式，直接说话。`
 }
@@ -296,6 +333,11 @@ class CharacterChatService {
     try {
       const removed = await characterChatStore.deleteProfile(contactId)
       if (!removed) return { success: false, error: '画像不存在' }
+      // 联动清理索引
+      try {
+        await characterChatStore.deleteIndex(contactId)
+        invalidateIndexCache(contactId)
+      } catch { /* 索引可能未建，忽略 */ }
       return { success: true }
     } catch (e) {
       return { success: false, error: (e as Error).message }
@@ -455,6 +497,77 @@ class CharacterChatService {
 
     this.sendProgress({ taskId, phase: 'done', message: '完成' })
     this.sendComplete({ taskId, contactId, profile })
+
+    // 画像完成后在后台异步构建 RAG 索引；失败不影响画像主流程
+    this.startBackgroundIndexBuild(contactId).catch(() => { /* 静默：已在 runIndexBuild 内推送事件 */ })
+  }
+
+  // ───── RAG 索引 API（里程碑 3） ─────
+
+  private indexAbortControllers: Map<string, AbortController> = new Map()
+
+  /** 获取索引状态（供 UI 显示） */
+  async getIndexStatus(contactId: string): Promise<{ success: boolean; status?: Awaited<ReturnType<typeof characterChatStore.getIndexStatus>>; error?: string }> {
+    try {
+      const status = await characterChatStore.getIndexStatus(contactId)
+      return { success: true, status }
+    } catch (e) {
+      return { success: false, error: (e as Error).message }
+    }
+  }
+
+  /** 手动触发构建索引（异步，立即返回） */
+  async buildIndex(contactId: string): Promise<{ success: boolean; error?: string }> {
+    if (!contactId) return { success: false, error: '缺少 contactId' }
+    if (this.indexAbortControllers.has(contactId)) {
+      return { success: false, error: '索引构建任务已在进行中' }
+    }
+    this.startBackgroundIndexBuild(contactId).catch(() => { /* 事件内已处理 */ })
+    return { success: true }
+  }
+
+  stopBuildIndex(contactId: string): { success: boolean } {
+    const ac = this.indexAbortControllers.get(contactId)
+    if (ac) {
+      ac.abort()
+      this.indexAbortControllers.delete(contactId)
+      return { success: true }
+    }
+    return { success: false }
+  }
+
+  /** 删除索引（画像删除时也会联动清理） */
+  async deleteIndex(contactId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await characterChatStore.deleteIndex(contactId)
+      invalidateIndexCache(contactId)
+      return { success: true }
+    } catch (e) {
+      return { success: false, error: (e as Error).message }
+    }
+  }
+
+  private async startBackgroundIndexBuild(contactId: string): Promise<void> {
+    if (this.indexAbortControllers.has(contactId)) return
+    const ac = new AbortController()
+    this.indexAbortControllers.set(contactId, ac)
+    try {
+      const result = await buildRetrievalIndex(
+        contactId,
+        (p) => this.sendIndexProgress(p),
+        ac.signal
+      )
+      this.sendIndexComplete({
+        contactId,
+        snippetCount: result.snippetCount,
+        sourceMessageCount: result.sourceMessageCount
+      })
+    } catch (e) {
+      const msg = (e as Error).message || String(e)
+      if (msg !== '已取消') this.sendIndexError({ contactId, error: msg })
+    } finally {
+      this.indexAbortControllers.delete(contactId)
+    }
   }
 
   // ───── 对话 API（里程碑 2） ─────
@@ -562,8 +675,20 @@ class CharacterChatService {
     const turns: AiTurn[] = history.map(m => ({ role: m.role, content: m.content }))
     if (turns.length === 0) throw new Error('内部错误：对话历史为空')
 
-    // 2. System prompt
-    const systemPrompt = buildConversationSystemPrompt(profile)
+    // 2. RAG 召回：用本轮用户输入（最后一条 user turn）做 query
+    //    索引不存在/命中为空时静默跳过（不影响对话主流程）
+    const lastUserTurn = [...turns].reverse().find(t => t.role === 'user')
+    let retrieved: RetrievedSnippet[] = []
+    if (lastUserTurn?.content) {
+      try {
+        retrieved = await retrieveSnippets(contactId, lastUserTurn.content, RAG_TOP_K)
+      } catch {
+        retrieved = []
+      }
+    }
+
+    // 3. System prompt（含可选的 RAG 片段块）
+    const systemPrompt = buildConversationSystemPrompt(profile, retrieved)
 
     // 3. AI 配置
     const apiConfig = this.resolveApiConfig({
@@ -673,6 +798,18 @@ class CharacterChatService {
 
   private sendReplyError(payload: { contactId: string; error: string }): void {
     this.getMainWindow()?.webContents.send('characterChat:replyError', payload)
+  }
+
+  private sendIndexProgress(payload: BuildIndexProgress): void {
+    this.getMainWindow()?.webContents.send('characterChat:indexProgress', payload)
+  }
+
+  private sendIndexComplete(payload: { contactId: string; snippetCount: number; sourceMessageCount: number }): void {
+    this.getMainWindow()?.webContents.send('characterChat:indexComplete', payload)
+  }
+
+  private sendIndexError(payload: { contactId: string; error: string }): void {
+    this.getMainWindow()?.webContents.send('characterChat:indexError', payload)
   }
 }
 

@@ -1231,6 +1231,20 @@ export interface ElectronAPI {
       error?: string
     }>
     clearConversation: (contactId: string) => Promise<{ success: boolean; error?: string }>
+    getIndexStatus: (contactId: string) => Promise<{
+      success: boolean
+      status?: {
+        exists: boolean
+        buildAt?: number
+        totalSnippets?: number
+        sourceMessageCount?: number
+        version?: number
+      }
+      error?: string
+    }>
+    buildIndex: (contactId: string) => Promise<{ success: boolean; error?: string }>
+    stopBuildIndex: (contactId: string) => Promise<{ success: boolean }>
+    deleteIndex: (contactId: string) => Promise<{ success: boolean; error?: string }>
     onProgress: (callback: (payload: {
       taskId: string
       phase: 'loading' | 'formatting' | 'generating' | 'saving' | 'done'
@@ -1248,6 +1262,20 @@ export interface ElectronAPI {
       assistantMessages: Array<{ id: string; role: 'assistant'; content: string; createdAt: number }>
     }) => void) => () => void
     onReplyError: (callback: (payload: { contactId: string; error: string }) => void) => () => void
+    onIndexProgress: (callback: (payload: {
+      contactId: string
+      phase: 'loading' | 'segmenting' | 'indexing' | 'writing' | 'done'
+      message: string
+      current?: number
+      total?: number
+      indeterminate?: boolean
+    }) => void) => () => void
+    onIndexComplete: (callback: (payload: {
+      contactId: string
+      snippetCount: number
+      sourceMessageCount: number
+    }) => void) => () => void
+    onIndexError: (callback: (payload: { contactId: string; error: string }) => void) => () => void
   }
   annualReportAi: {
     generateNarration: (params: {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft, Sparkles, Trash2, RotateCcw, Loader2, Users, AlertCircle, Info,
-  Send, ScrollText, X, StopCircle
+  Send, ScrollText, X, StopCircle, Database, CheckCircle2
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -56,9 +56,11 @@ export default function CharacterChatPage() {
     progressPhase, progressMessage, progressCurrent, progressTotal, progressIndeterminate,
     errorMessage, profilesCache, profilesSummary, summaryLoaded,
     messages, conversationLoaded, replyStreamingText, isReplying, replyError,
+    indexStatus, indexBuilding, indexProgress, indexError,
     startTask, resetTask, setProfile, setProfilesSummary, removeProfile,
     setConversation, appendMessage, startReply, setReplyError,
-    clearConversation: clearConvStore
+    clearConversation: clearConvStore,
+    setIndexStatus
   } = useCharacterChatStore()
 
   const [sampleSize, setSampleSize] = useState<number>(() => {
@@ -78,6 +80,11 @@ export default function CharacterChatPage() {
   const streamText = (contactId && replyStreamingText[contactId]) || ''
   const replying = !!(contactId && isReplying[contactId])
   const thisReplyError = (contactId && replyError[contactId]) || ''
+
+  const currentIndexStatus = (contactId && indexStatus[contactId]) || undefined
+  const currentIndexBuilding = !!(contactId && indexBuilding[contactId])
+  const currentIndexProgress = (contactId && indexProgress[contactId]) || undefined
+  const currentIndexError = (contactId && indexError[contactId]) || ''
 
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -106,6 +113,15 @@ export default function CharacterChatPage() {
       if (r.success) setConversation(contactId, (r.messages as ChatMessage[]) || [])
     })
   }, [contactId, profile, conversationLoaded, setConversation])
+
+  // 画像加载完后拉索引状态（避免每次抽屉都刷新）
+  useEffect(() => {
+    if (!contactId || !profile) return
+    if (currentIndexStatus || currentIndexBuilding) return
+    window.electronAPI.characterChat.getIndexStatus(contactId).then(r => {
+      if (r.success && r.status) setIndexStatus(contactId, r.status)
+    })
+  }, [contactId, profile, currentIndexStatus, currentIndexBuilding, setIndexStatus])
 
   // 保存 sampleSize
   useEffect(() => {
@@ -183,6 +199,15 @@ export default function CharacterChatPage() {
     if (!contactId) return
     await window.electronAPI.characterChat.stopReply(contactId)
     useCharacterChatStore.getState().clearReply(contactId)
+  }, [contactId])
+
+  const handleBuildIndex = useCallback(async () => {
+    if (!contactId) return
+    useCharacterChatStore.getState().startIndexBuild(contactId)
+    const r = await window.electronAPI.characterChat.buildIndex(contactId)
+    if (!r.success) {
+      useCharacterChatStore.getState().setIndexError(contactId, r.error || '启动索引构建失败')
+    }
   }, [contactId])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -427,6 +452,65 @@ export default function CharacterChatPage() {
           <span>·</span>
           <span>{formatRelative(p.generatedAt)}生成</span>
         </div>
+
+        <div className="cc-drawer-index">
+          <div className="cc-index-head">
+            <Database size={14} />
+            <span className="cc-index-title">检索索引（RAG）</span>
+          </div>
+          {currentIndexBuilding ? (
+            <div className="cc-index-building">
+              <div className="cc-index-msg">
+                <Loader2 className="cc-spin" size={13} />
+                <span>{currentIndexProgress?.message || '构建中…'}</span>
+              </div>
+              {currentIndexProgress?.indeterminate === false && currentIndexProgress?.total ? (
+                <div className="cc-prog-bar">
+                  <div
+                    className="cc-prog-fill"
+                    style={{ width: `${Math.min(100, Math.round(((currentIndexProgress.current || 0) / currentIndexProgress.total) * 100))}%` }}
+                  />
+                </div>
+              ) : (
+                <div className="cc-prog-bar cc-prog-indeterminate"><div className="cc-prog-fill" /></div>
+              )}
+            </div>
+          ) : currentIndexStatus?.exists ? (
+            <>
+              <div className="cc-index-ok">
+                <CheckCircle2 size={13} />
+                <span>
+                  已索引 <strong>{currentIndexStatus.totalSnippets ?? 0}</strong> 个片段
+                  {currentIndexStatus.sourceMessageCount ? `，覆盖 ${currentIndexStatus.sourceMessageCount} 条消息` : ''}
+                </span>
+              </div>
+              <div className="cc-index-tip">对话时会自动从历史中召回 6 条最相关的片段注入给 AI，以保留稀有表达与事实细节。</div>
+              <button className="cc-btn-ghost cc-btn-sm" onClick={handleBuildIndex}>
+                <RotateCcw size={12} />
+                重建索引
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="cc-index-miss">
+                <AlertCircle size={13} />
+                <span>尚未建立检索索引</span>
+              </div>
+              <div className="cc-index-tip">建立索引后，对话时可召回真实聊天片段，显著提升拟真度与事实一致性。</div>
+              <button className="cc-btn-primary cc-btn-sm" onClick={handleBuildIndex}>
+                <Database size={12} />
+                构建检索索引
+              </button>
+            </>
+          )}
+          {currentIndexError && (
+            <div className="cc-index-err">
+              <AlertCircle size={12} />
+              <span>{currentIndexError}</span>
+            </div>
+          )}
+        </div>
+
         <div className="cc-drawer-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{p.profileMarkdown}</ReactMarkdown>
         </div>
