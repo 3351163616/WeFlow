@@ -1,7 +1,8 @@
-import { join } from 'path'
+﻿import { join } from 'path'
 import { app, safeStorage } from 'electron'
 import crypto from 'crypto'
 import Store from 'electron-store'
+import { expandHomePath } from '../utils/pathUtils'
 
 // 加密前缀标记
 const SAFE_PREFIX = 'safe:'  // safeStorage 加密（普通模式）
@@ -42,7 +43,6 @@ interface ConfigSchema {
   autoTranscribeVoice: boolean
   transcribeLanguages: string[]
   exportDefaultConcurrency: number
-  exportDefaultImageDeepSearchOnMiss: boolean
   analyticsExcludedUsernames: string[]
 
   // 安全相关
@@ -77,12 +77,14 @@ interface ConfigSchema {
   aiModelApiBaseUrl: string
   aiModelApiKey: string
   aiModelApiModel: string
+  aiModelApiMaxTokens: number
   aiInsightEnabled: boolean
   aiInsightApiBaseUrl: string
   aiInsightApiKey: string
   aiInsightApiModel: string
   aiInsightSilenceDays: number
   aiInsightAllowContext: boolean
+  aiInsightAllowSocialContext: boolean
   aiInsightWhitelistEnabled: boolean
   aiInsightWhitelist: string[]
   /** 活跃分析冷却时间（分钟），0 表示无冷却 */
@@ -117,7 +119,8 @@ const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'authPassword',
   'httpApiToken',
   'aiModelApiKey',
-  'aiInsightApiKey'
+  'aiInsightApiKey',
+  'aiInsightWeiboCookie'
 ])
 const ENCRYPTED_BOOL_KEYS: Set<string> = new Set(['authEnabled', 'authUseHello'])
 const ENCRYPTED_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
@@ -168,7 +171,6 @@ export class ConfigService {
       autoTranscribeVoice: false,
       transcribeLanguages: ['zh'],
       exportDefaultConcurrency: 4,
-      exportDefaultImageDeepSearchOnMiss: true,
       analyticsExcludedUsernames: [],
       authEnabled: false,
       authPassword: '',
@@ -195,21 +197,26 @@ export class ConfigService {
       aiModelApiBaseUrl: '',
       aiModelApiKey: '',
       aiModelApiModel: 'gpt-4o-mini',
+      aiModelApiMaxTokens: 200,
       aiInsightEnabled: false,
       aiInsightApiBaseUrl: '',
       aiInsightApiKey: '',
       aiInsightApiModel: 'gpt-4o-mini',
       aiInsightSilenceDays: 3,
       aiInsightAllowContext: false,
+      aiInsightAllowSocialContext: false,
       aiInsightWhitelistEnabled: false,
       aiInsightWhitelist: [],
       aiInsightCooldownMinutes: 120,
       aiInsightScanIntervalHours: 4,
       aiInsightContextCount: 40,
+      aiInsightSocialContextCount: 3,
       aiInsightSystemPrompt: '',
       aiInsightTelegramEnabled: false,
       aiInsightTelegramToken: '',
       aiInsightTelegramChatIds: '',
+      aiInsightWeiboCookie: '',
+      aiInsightWeiboBindings: {},
       aiFootprintEnabled: false,
       aiFootprintSystemPrompt: '',
       aiInsightDebugLogEnabled: false,
@@ -295,12 +302,20 @@ export class ConfigService {
       return this.decryptWxidConfigs(raw as any) as ConfigSchema[K]
     }
 
+    if (key === 'dbPath' && typeof raw === 'string') {
+      return expandHomePath(raw) as ConfigSchema[K]
+    }
+
     return raw
   }
 
   set<K extends keyof ConfigSchema>(key: K, value: ConfigSchema[K]): void {
     let toStore = value
     const inLockMode = this.isLockMode() && this.unlockPassword
+
+    if (key === 'dbPath' && typeof value === 'string') {
+      toStore = expandHomePath(value) as ConfigSchema[K]
+    }
 
     if (ENCRYPTED_BOOL_KEYS.has(key)) {
       const boolValue = value === true || value === 'true'
@@ -831,3 +846,4 @@ export class ConfigService {
     this.unlockPassword = null
   }
 }
+

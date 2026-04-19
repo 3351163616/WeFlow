@@ -218,7 +218,7 @@ class CloudControlService {
     this.pages.add(pageName)
   }
 
-  stop() {
+  async stop(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
@@ -230,7 +230,13 @@ class CloudControlService {
     this.circuitOpenedAt = 0
     this.nextDelayOverrideMs = null
     this.initialized = false
-    wcdbService.cloudStop()
+    if (wcdbService.isReady()) {
+      try {
+        await wcdbService.cloudStop()
+      } catch {
+        // 忽略停止失败，避免阻塞主进程退出
+      }
+    }
   }
 
   async getLogs() {

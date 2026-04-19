@@ -2,7 +2,7 @@ import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
 import { ContactCacheService } from './contactCacheService'
 import { app } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, unlinkSync } from 'fs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { basename, join } from 'path'
 import crypto from 'crypto'
@@ -174,8 +174,17 @@ const detectImageMime = (buf: Buffer, fallback: string = 'image/jpeg') => {
     // BMP
     if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp'
 
-    // MP4: 00 00 00 18 / 20 / ... + 'ftyp'
-    if (buf.length > 8 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) return 'video/mp4'
+    // ISO BMFF 家族：优先识别 AVIF/HEIF，避免误判为 MP4
+    if (buf.length > 12 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+        const ftypWindow = buf.subarray(8, Math.min(buf.length, 64)).toString('ascii').toLowerCase()
+        if (ftypWindow.includes('avif') || ftypWindow.includes('avis')) return 'image/avif'
+        if (
+            ftypWindow.includes('heic') || ftypWindow.includes('heix') ||
+            ftypWindow.includes('hevc') || ftypWindow.includes('hevx') ||
+            ftypWindow.includes('mif1') || ftypWindow.includes('msf1')
+        ) return 'image/heic'
+        return 'video/mp4'
+    }
 
     // Fallback logic for video
     if (fallback.includes('video') || fallback.includes('mp4')) return 'video/mp4'
@@ -1231,7 +1240,19 @@ class SnsService {
         const cacheKey = `${url}|${key ?? ''}`
 
         if (this.imageCache.has(cacheKey)) {
-            return { success: true, dataUrl: this.imageCache.get(cacheKey) }
+            const cachedDataUrl = this.imageCache.get(cacheKey) || ''
+            const base64Part = cachedDataUrl.split(',')[1] || ''
+            if (base64Part) {
+                try {
+                    const cachedBuf = Buffer.from(base64Part, 'base64')
+                    if (detectImageMime(cachedBuf, '').startsWith('image/')) {
+                        return { success: true, dataUrl: cachedDataUrl }
+                    }
+                } catch {
+                    // ignore and fall through to refetch
+                }
+            }
+            this.imageCache.delete(cacheKey)
         }
 
         const result = await this.fetchAndDecryptImage(url, key)
@@ -1244,6 +1265,9 @@ class SnsService {
             }
 
             if (result.data && result.contentType) {
+                if (!detectImageMime(result.data, '').startsWith('image/')) {
+                    return { success: false, error: '无效图片数据（可能密钥不匹配或缓存损坏）' }
+                }
                 const dataUrl = `data:${result.contentType};base64,${result.data.toString('base64')}`
                 this.imageCache.set(cacheKey, dataUrl)
                 return { success: true, dataUrl }
@@ -1853,8 +1877,13 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                 }
 
                 const data = await readFile(cachePath)
-                const contentType = detectImageMime(data)
-                return { success: true, data, contentType, cachePath }
+                if (!detectImageMime(data, '').startsWith('image/')) {
+                    // 旧版本可能把未解密内容写入缓存；发现无效图片头时删除并重新拉取。
+                    try { unlinkSync(cachePath) } catch { }
+                } else {
+                    const contentType = detectImageMime(data)
+                    return { success: true, data, contentType, cachePath }
+                }
             } catch (e) {
                 console.warn(`[SnsService] 读取缓存失败: ${cachePath}`, e)
             }
@@ -2006,6 +2035,7 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                         const xEnc = String(res.headers['x-enc'] || '').trim()
 
                         let decoded = raw
+                        const rawMagicMime = detectImageMime(raw, '')
 
                         // 图片逻辑
                         const shouldDecrypt = (xEnc === '1' || !!key) && key !== undefined && key !== null && String(key).trim().length > 0
@@ -2023,11 +2053,22 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
                                         decrypted[i] = raw[i] ^ keystream[i]
                                     }
 
-                                    decoded = decrypted
+                                    const decryptedMagicMime = detectImageMime(decrypted, '')
+                                    if (decryptedMagicMime.startsWith('image/')) {
+                                        decoded = decrypted
+                                    } else if (!rawMagicMime.startsWith('image/')) {
+                                        decoded = decrypted
+                                    }
                                 }
                             } catch (e) {
                                 console.error('[SnsService] TS Decrypt Error:', e)
                             }
+                        }
+
+                        const decodedMagicMime = detectImageMime(decoded, '')
+                        if (!decodedMagicMime.startsWith('image/')) {
+                            resolve({ success: false, error: '图片解密失败：无法识别图片格式' })
+                            return
                         }
 
                         // 写入磁盘缓存
@@ -2063,6 +2104,15 @@ window.addEventListener('scroll',function(){document.getElementById('btt').class
         if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true
         if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
             && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true
+        if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+            const ftypWindow = buf.subarray(8, Math.min(buf.length, 64)).toString('ascii').toLowerCase()
+            if (ftypWindow.includes('avif') || ftypWindow.includes('avis')) return true
+            if (
+                ftypWindow.includes('heic') || ftypWindow.includes('heix') ||
+                ftypWindow.includes('hevc') || ftypWindow.includes('hevx') ||
+                ftypWindow.includes('mif1') || ftypWindow.includes('msf1')
+            ) return true
+        }
         return false
     }
 

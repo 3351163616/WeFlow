@@ -29,6 +29,7 @@ import {
   onSingleExportDialogStatus,
   requestExportSessionStatus
 } from '../services/exportBridge'
+import '../styles/batchTranscribe.scss'
 import './ChatPage.scss'
 
 // 系统消息类型常量
@@ -152,6 +153,21 @@ function normalizeChatRecordText(value?: string): string {
 
 function hasRenderableChatRecordName(value?: string): boolean {
   return value !== undefined && value !== null && String(value).length > 0
+}
+
+function toRenderableImageSrc(path?: string): string | undefined {
+  const raw = String(path || '').trim()
+  if (!raw) return undefined
+  if (/^(data:|blob:|https?:|file:)/i.test(raw)) return raw
+
+  const normalized = raw.replace(/\\/g, '/')
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return encodeURI(`file:///${normalized}`)
+  }
+  if (normalized.startsWith('/')) {
+    return encodeURI(`file://${normalized}`)
+  }
+  return raw
 }
 
 function getChatRecordPreviewText(item: ChatRecordItem): string {
@@ -1355,34 +1371,30 @@ function ChatPage(props: ChatPageProps) {
   const {
     isBatchTranscribing,
     runningBatchVoiceTaskType,
-    batchTranscribeProgress,
     startTranscribe,
     updateProgress,
-    finishTranscribe,
-    setShowBatchProgress
+    updateTranscribeTaskStatus,
+    finishTranscribe
   } = useBatchTranscribeStore(useShallow((state) => ({
     isBatchTranscribing: state.isBatchTranscribing,
     runningBatchVoiceTaskType: state.taskType,
-    batchTranscribeProgress: state.progress,
     startTranscribe: state.startTranscribe,
     updateProgress: state.updateProgress,
-    finishTranscribe: state.finishTranscribe,
-    setShowBatchProgress: state.setShowToast
+    updateTranscribeTaskStatus: state.setTaskStatus,
+    finishTranscribe: state.finishTranscribe
   })))
   const {
     isBatchDecrypting,
-    batchDecryptProgress,
     startDecrypt,
     updateDecryptProgress,
-    finishDecrypt,
-    setShowBatchDecryptToast
+    updateDecryptTaskStatus,
+    finishDecrypt
   } = useBatchImageDecryptStore(useShallow((state) => ({
     isBatchDecrypting: state.isBatchDecrypting,
-    batchDecryptProgress: state.progress,
     startDecrypt: state.startDecrypt,
     updateDecryptProgress: state.updateProgress,
-    finishDecrypt: state.finishDecrypt,
-    setShowBatchDecryptToast: state.setShowToast
+    updateDecryptTaskStatus: state.setTaskStatus,
+    finishDecrypt: state.finishDecrypt
   })))
   const [showBatchConfirm, setShowBatchConfirm] = useState(false)
   const [batchVoiceCount, setBatchVoiceCount] = useState(0)
@@ -4853,7 +4865,7 @@ function ChatPage(props: ChatPageProps) {
     const candidates = [...head, ...tail]
     const queued = preloadImageKeysRef.current
     const seen = new Set<string>()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }> = []
+    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
     for (const msg of candidates) {
       if (payloads.length >= maxPreload) break
       if (msg.localType !== 3) continue
@@ -4867,11 +4879,14 @@ function ChatPage(props: ChatPageProps) {
       payloads.push({
         sessionId: currentSessionId,
         imageMd5: msg.imageMd5 || undefined,
-        imageDatName: msg.imageDatName
+        imageDatName: msg.imageDatName,
+        createTime: msg.createTime
       })
     }
     if (payloads.length > 0) {
-      window.electronAPI.image.preload(payloads).catch(() => { })
+      window.electronAPI.image.preload(payloads, {
+        allowCacheIndex: false
+      }).catch(() => { })
     }
   }, [currentSessionId, messages])
 
@@ -5712,22 +5727,74 @@ function ChatPage(props: ChatPageProps) {
     if (!session) return
 
     const taskType = batchVoiceTaskType
-    startTranscribe(voiceMessages.length, session.displayName || session.username, taskType)
-
-    if (taskType === 'transcribe') {
-      // 检查模型状态
-      const modelStatus = await window.electronAPI.whisper.getModelStatus()
-      if (!modelStatus?.exists) {
-        alert('SenseVoice 模型未下载，请先在设置中下载模型')
-        finishTranscribe(0, 0)
-        return
-      }
-    }
-
+    const totalVoices = voiceMessages.length
+    const taskVerb = taskType === 'decrypt' ? '语音解密' : '语音转写'
     let successCount = 0
     let failCount = 0
     let completedCount = 0
     const concurrency = taskType === 'decrypt' ? 12 : 10
+    const controlState = {
+      cancelRequested: false,
+      pauseRequested: false,
+      pauseAnnounced: false,
+      resumeWaiters: [] as Array<() => void>
+    }
+    const resolveResumeWaiters = () => {
+      const waiters = [...controlState.resumeWaiters]
+      controlState.resumeWaiters.length = 0
+      waiters.forEach(resolve => resolve())
+    }
+    const waitIfPaused = async () => {
+      while (controlState.pauseRequested && !controlState.cancelRequested) {
+        if (!controlState.pauseAnnounced) {
+          controlState.pauseAnnounced = true
+          updateTranscribeTaskStatus(
+            `${taskVerb}任务已中断，等待继续...`,
+            `${completedCount} / ${totalVoices}`,
+            'paused'
+          )
+        }
+        await new Promise<void>(resolve => {
+          controlState.resumeWaiters.push(resolve)
+        })
+      }
+      if (controlState.pauseAnnounced && !controlState.cancelRequested) {
+        controlState.pauseAnnounced = false
+        updateTranscribeTaskStatus(
+          `继续${taskVerb}（${completedCount}/${totalVoices}）`,
+          `${completedCount} / ${totalVoices}`,
+          'running'
+        )
+      }
+    }
+
+    startTranscribe(totalVoices, session.displayName || session.username, taskType, 'chat', {
+      cancelable: true,
+      resumable: true,
+      onPause: () => {
+        controlState.pauseRequested = true
+        updateTranscribeTaskStatus(
+          `${taskVerb}中断请求已发出，当前处理完成后暂停...`,
+          `${completedCount} / ${totalVoices}`,
+          'pause_requested'
+        )
+      },
+      onResume: () => {
+        controlState.pauseRequested = false
+        resolveResumeWaiters()
+      },
+      onCancel: () => {
+        controlState.cancelRequested = true
+        controlState.pauseRequested = false
+        resolveResumeWaiters()
+        updateTranscribeTaskStatus(
+          `${taskVerb}停止请求已发出，当前处理完成后结束...`,
+          `${completedCount} / ${totalVoices}`,
+          'cancel_requested'
+        )
+      }
+    })
+    updateTranscribeTaskStatus(`正在准备${taskVerb}任务...`, `0 / ${totalVoices}`, 'running')
 
     const runOne = async (msg: Message) => {
       try {
@@ -5751,20 +5818,74 @@ function ChatPage(props: ChatPageProps) {
       }
     }
 
-    for (let i = 0; i < voiceMessages.length; i += concurrency) {
-      const batch = voiceMessages.slice(i, i + concurrency)
-      const results = await Promise.all(batch.map(msg => runOne(msg)))
+    try {
+      if (taskType === 'transcribe') {
+        updateTranscribeTaskStatus('正在检查转写模型...', `0 / ${totalVoices}`)
+        const modelStatus = await window.electronAPI.whisper.getModelStatus()
+        if (!modelStatus?.exists) {
+          alert('SenseVoice 模型未下载，请先在设置中下载模型')
+          updateTranscribeTaskStatus('转写模型缺失，任务已停止', `0 / ${totalVoices}`)
+          finishTranscribe(0, totalVoices)
+          return
+        }
+      }
 
-      results.forEach(result => {
+      updateTranscribeTaskStatus(`正在${taskVerb}（0/${totalVoices}）`, `0 / ${totalVoices}`)
+      const pool = new Set<Promise<void>>()
+
+      const runOneTracked = async (msg: Message) => {
+        if (controlState.cancelRequested) return
+        const result = await runOne(msg)
         if (result.success) successCount++
         else failCount++
         completedCount++
-        updateProgress(completedCount, voiceMessages.length)
-      })
-    }
+        updateProgress(completedCount, totalVoices)
+      }
 
-    finishTranscribe(successCount, failCount)
-  }, [sessions, currentSessionId, batchSelectedDates, batchVoiceMessages, batchVoiceTaskType, startTranscribe, updateProgress, finishTranscribe])
+      for (const msg of voiceMessages) {
+        if (controlState.cancelRequested) break
+        await waitIfPaused()
+        if (controlState.cancelRequested) break
+        if (pool.size >= concurrency) {
+          await Promise.race(pool)
+          if (controlState.cancelRequested) break
+          await waitIfPaused()
+          if (controlState.cancelRequested) break
+        }
+        let p: Promise<void> = Promise.resolve()
+        p = runOneTracked(msg).finally(() => {
+          pool.delete(p)
+        })
+        pool.add(p)
+      }
+
+      while (pool.size > 0) {
+        await Promise.race(pool)
+      }
+
+      if (controlState.cancelRequested) {
+        const remaining = Math.max(0, totalVoices - completedCount)
+        finishTranscribe(successCount, failCount, {
+          status: 'canceled',
+          detail: `${taskVerb}任务已中断：已完成 ${completedCount}/${totalVoices}（成功 ${successCount}，失败 ${failCount}，未处理 ${remaining}）`,
+          progressText: `${completedCount} / ${totalVoices}`
+        })
+        return
+      }
+
+      finishTranscribe(successCount, failCount, {
+        status: failCount > 0 ? 'failed' : 'completed'
+      })
+    } catch (error) {
+      const remaining = Math.max(0, totalVoices - completedCount)
+      failCount += remaining
+      updateTranscribeTaskStatus(`${taskVerb}过程中发生异常，正在结束任务...`, `${completedCount} / ${totalVoices}`)
+      finishTranscribe(successCount, failCount, {
+        status: 'failed'
+      })
+      alert(`批量${taskVerb}失败：${String(error)}`)
+    }
+  }, [sessions, currentSessionId, batchSelectedDates, batchVoiceMessages, batchVoiceTaskType, startTranscribe, updateTranscribeTaskStatus, updateProgress, finishTranscribe])
 
   // 批量转写：按日期的消息数量
   const batchCountByDate = useMemo(() => {
@@ -5827,45 +5948,175 @@ function ChatPage(props: ChatPageProps) {
     setBatchImageDates([])
     setBatchImageSelectedDates(new Set())
 
-    startDecrypt(images.length, session.displayName || session.username)
-
+    const totalImages = images.length
     let successCount = 0
     let failCount = 0
+    let notFoundCount = 0
+    let decryptFailedCount = 0
     let completed = 0
+    const controlState = {
+      cancelRequested: false,
+      pauseRequested: false,
+      pauseAnnounced: false,
+      resumeWaiters: [] as Array<() => void>
+    }
+    const resolveResumeWaiters = () => {
+      const waiters = [...controlState.resumeWaiters]
+      controlState.resumeWaiters.length = 0
+      waiters.forEach(resolve => resolve())
+    }
+    const waitIfPaused = async () => {
+      while (controlState.pauseRequested && !controlState.cancelRequested) {
+        if (!controlState.pauseAnnounced) {
+          controlState.pauseAnnounced = true
+          updateDecryptTaskStatus(
+            '图片批量解密任务已中断，等待继续...',
+            `${completed} / ${totalImages}`,
+            'paused'
+          )
+        }
+        await new Promise<void>(resolve => {
+          controlState.resumeWaiters.push(resolve)
+        })
+      }
+      if (controlState.pauseAnnounced && !controlState.cancelRequested) {
+        controlState.pauseAnnounced = false
+        updateDecryptTaskStatus(
+          `继续批量解密图片（${completed}/${totalImages}）`,
+          `${completed} / ${totalImages}`,
+          'running'
+        )
+      }
+    }
+
+    startDecrypt(totalImages, session.displayName || session.username, 'chat', {
+      cancelable: true,
+      resumable: true,
+      onPause: () => {
+        controlState.pauseRequested = true
+        updateDecryptTaskStatus(
+          '图片解密中断请求已发出，当前处理完成后暂停...',
+          `${completed} / ${totalImages}`,
+          'pause_requested'
+        )
+      },
+      onResume: () => {
+        controlState.pauseRequested = false
+        resolveResumeWaiters()
+      },
+      onCancel: () => {
+        controlState.cancelRequested = true
+        controlState.pauseRequested = false
+        resolveResumeWaiters()
+        updateDecryptTaskStatus(
+          '图片解密停止请求已发出，当前处理完成后结束...',
+          `${completed} / ${totalImages}`,
+          'cancel_requested'
+        )
+      }
+    })
+    updateDecryptTaskStatus('正在准备批量图片解密任务...', `0 / ${totalImages}`, 'running')
+
+    const hardlinkMd5Set = new Set<string>()
+    for (const img of images) {
+      const imageMd5 = String(img.imageMd5 || '').trim().toLowerCase()
+      if (imageMd5) {
+        hardlinkMd5Set.add(imageMd5)
+        continue
+      }
+      const imageDatName = String(img.imageDatName || '').trim().toLowerCase()
+      if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
+        hardlinkMd5Set.add(imageDatName)
+      }
+    }
+    if (hardlinkMd5Set.size > 0) {
+      await waitIfPaused()
+      if (controlState.cancelRequested) {
+        const remaining = Math.max(0, totalImages - completed)
+        finishDecrypt(successCount, failCount, {
+          status: 'canceled',
+          detail: `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
+          progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+        })
+        return
+      }
+      updateDecryptTaskStatus(
+        `正在预热图片索引（${hardlinkMd5Set.size} 个标识）...`,
+        `0 / ${totalImages}`
+      )
+      try {
+        await window.electronAPI.image.preloadHardlinkMd5s(Array.from(hardlinkMd5Set))
+      } catch {
+        // ignore preload failures and continue decrypt
+      }
+    }
+    updateDecryptTaskStatus(`开始批量解密图片（0/${totalImages}）`, `0 / ${totalImages}`)
+
     const concurrency = batchDecryptConcurrency
 
     const decryptOne = async (img: typeof images[0]) => {
+      if (controlState.cancelRequested) return
       try {
         const r = await window.electronAPI.image.decrypt({
           sessionId: session.username,
           imageMd5: img.imageMd5,
           imageDatName: img.imageDatName,
-          force: true
+          createTime: img.createTime,
+          force: true,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          disableUpdateCheck: true,
+          suppressEvents: true
         })
         if (r?.success) successCount++
-        else failCount++
+        else {
+          failCount++
+          if (r?.failureKind === 'decrypt_failed') decryptFailedCount++
+          else notFoundCount++
+        }
       } catch {
         failCount++
+        notFoundCount++
       }
       completed++
-      updateDecryptProgress(completed, images.length)
+      updateDecryptProgress(completed, totalImages)
     }
 
-    // 并发池：同时跑 concurrency 个任务
     const pool = new Set<Promise<void>>()
     for (const img of images) {
-      const p = decryptOne(img).then(() => { pool.delete(p) })
-      pool.add(p)
+      if (controlState.cancelRequested) break
+      await waitIfPaused()
+      if (controlState.cancelRequested) break
       if (pool.size >= concurrency) {
         await Promise.race(pool)
+        if (controlState.cancelRequested) break
+        await waitIfPaused()
+        if (controlState.cancelRequested) break
       }
+      let p: Promise<void> = Promise.resolve()
+      p = decryptOne(img).then(() => { pool.delete(p) })
+      pool.add(p)
     }
-    if (pool.size > 0) {
-      await Promise.all(pool)
+    while (pool.size > 0) {
+      await Promise.race(pool)
     }
 
-    finishDecrypt(successCount, failCount)
-  }, [batchImageMessages, batchImageSelectedDates, batchDecryptConcurrency, currentSessionId, finishDecrypt, sessions, startDecrypt, updateDecryptProgress])
+    if (controlState.cancelRequested) {
+      const remaining = Math.max(0, totalImages - completed)
+      finishDecrypt(successCount, failCount, {
+        status: 'canceled',
+        detail: `图片批量解密已中断：已处理 ${completed}/${totalImages}（成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}，未处理 ${remaining}）`,
+        progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+      })
+      return
+    }
+
+    finishDecrypt(successCount, failCount, {
+      status: decryptFailedCount > 0 ? 'failed' : 'completed',
+      detail: `图片批量解密完成：成功 ${successCount}，未找到 ${notFoundCount}，解密失败 ${decryptFailedCount}`,
+      progressText: `成功 ${successCount} / 未找到 ${notFoundCount} / 解密失败 ${decryptFailedCount}`
+    })
+  }, [batchImageMessages, batchImageSelectedDates, batchDecryptConcurrency, currentSessionId, finishDecrypt, sessions, startDecrypt, updateDecryptTaskStatus, updateDecryptProgress])
 
   const batchImageCountByDate = useMemo(() => {
     const map = new Map<string, number>()
@@ -6610,16 +6861,10 @@ function ChatPage(props: ChatPageProps) {
                 {!standaloneSessionWindow && (
                   <button
                     className={`icon-btn batch-transcribe-btn${isBatchTranscribing ? ' transcribing' : ''}`}
-                    onClick={() => {
-                      if (isBatchTranscribing) {
-                        setShowBatchProgress(true)
-                      } else {
-                        handleBatchTranscribe()
-                      }
-                    }}
+                    onClick={handleBatchTranscribe}
                     disabled={!currentSessionId}
                     title={isBatchTranscribing
-                      ? `${runningBatchVoiceTaskType === 'decrypt' ? '批量语音解密' : '批量转写'}中 (${batchTranscribeProgress.current}/${batchTranscribeProgress.total})，点击查看进度`
+                      ? `${runningBatchVoiceTaskType === 'decrypt' ? '批量语音解密' : '批量转写'}中，可在导出页任务中心查看进度`
                       : '批量语音处理（解密/转文字）'}
                   >
                     {isBatchTranscribing ? (
@@ -6632,16 +6877,10 @@ function ChatPage(props: ChatPageProps) {
                 {!standaloneSessionWindow && (
                   <button
                     className={`icon-btn batch-decrypt-btn${isBatchDecrypting ? ' transcribing' : ''}`}
-                    onClick={() => {
-                      if (isBatchDecrypting) {
-                        setShowBatchDecryptToast(true)
-                      } else {
-                        handleBatchDecrypt()
-                      }
-                    }}
+                    onClick={handleBatchDecrypt}
                     disabled={!currentSessionId}
                     title={isBatchDecrypting
-                      ? `批量解密中 (${batchDecryptProgress.current}/${batchDecryptProgress.total})，点击查看进度`
+                      ? '批量解密中，可在导出页任务中心查看进度'
                       : '批量解密图片'}
                   >
                     {isBatchDecrypting ? (
@@ -7195,14 +7434,29 @@ function ChatPage(props: ChatPageProps) {
                           <span>数据库分布</span>
                         </div>
                         {Array.isArray(sessionDetail.messageTables) && sessionDetail.messageTables.length > 0 ? (
-                          <div className="table-list">
-                            {sessionDetail.messageTables.map((t, i) => (
-                              <div key={i} className="table-item">
-                                <span className="db-name">{t.dbName}</span>
-                                <span className="table-count">{t.count.toLocaleString()} 条</span>
-                              </div>
-                            ))}
-                          </div>
+                          <>
+                            <div className="table-name-summary">
+                              <span className="table-name-label">表名</span>
+                              <span className="table-name-value">
+                                {(() => {
+                                  const tableNames = Array.from(new Set(
+                                    sessionDetail.messageTables
+                                      .map(item => String(item.tableName || '').trim())
+                                      .filter(Boolean)
+                                  ))
+                                  return tableNames[0] || '—'
+                                })()}
+                              </span>
+                            </div>
+                            <div className="table-list">
+                              {sessionDetail.messageTables.map((t, i) => (
+                                <div key={`${t.dbName}-${t.tableName}-${i}`} className="table-item">
+                                  <span className="db-name">{t.dbName || '—'}</span>
+                                  <span className="table-count">{t.count.toLocaleString()} 条</span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
                         ) : (
                           <div className="detail-table-placeholder">
                             {isLoadingDetailExtra ? '统计中...' : '暂无统计数据'}
@@ -7319,8 +7573,8 @@ function ChatPage(props: ChatPageProps) {
                 <AlertCircle size={16} />
                 <span>
                   {batchVoiceTaskType === 'decrypt'
-                    ? '批量解密会预先缓存语音数据，之后播放和转写会更快。解密过程中可以继续使用其他功能。'
-                    : '批量转写可能需要较长时间，转写过程中可以继续使用其他功能。已转写过的语音会自动跳过。'}
+                    ? '批量解密会预先缓存语音数据，之后播放和转写会更快。解密过程中可以继续使用其他功能，进度会写入导出页任务中心。'
+                    : '批量转写可能需要较长时间，转写过程中可以继续使用其他功能。已转写过的语音会自动跳过，进度会写入导出页任务中心。'}
                 </span>
               </div>
             </div>
@@ -7387,17 +7641,17 @@ function ChatPage(props: ChatPageProps) {
                       className={`batch-concurrency-trigger ${showConcurrencyDropdown ? 'open' : ''}`}
                       onClick={() => setShowConcurrencyDropdown(!showConcurrencyDropdown)}
                     >
-                      <span>{batchDecryptConcurrency === 1 ? '1（最慢，最稳）' : batchDecryptConcurrency === 6 ? '6（推荐）' : batchDecryptConcurrency === 20 ? '20（最快，可能卡顿）' : String(batchDecryptConcurrency)}</span>
+                      <span>{batchDecryptConcurrency === 1 ? '1' : batchDecryptConcurrency === 6 ? '6' : batchDecryptConcurrency === 20 ? '20' : String(batchDecryptConcurrency)}</span>
                       <ChevronDown size={14} />
                     </button>
                     {showConcurrencyDropdown && (
                       <div className="batch-concurrency-dropdown">
                         {[
-                          { value: 1, label: '1（最慢，最稳）' },
+                          { value: 1, label: '1' },
                           { value: 3, label: '3' },
-                          { value: 6, label: '6（推荐）' },
+                          { value: 6, label: '6' },
                           { value: 10, label: '10' },
-                          { value: 20, label: '20（最快，可能卡顿）' },
+                          { value: 20, label: '20' },
                         ].map(opt => (
                           <button
                             key={opt.value}
@@ -7415,7 +7669,7 @@ function ChatPage(props: ChatPageProps) {
               </div>
               <div className="batch-warning">
                 <AlertCircle size={16} />
-                <span>批量解密可能需要较长时间，进行中会在右下角显示非阻塞进度浮层。</span>
+                <span>批量解密可能需要较长时间，进度会自动写入导出页任务中心（含准备阶段状态）。</span>
               </div>
             </div>
             <div className="batch-modal-footer">
@@ -7778,7 +8032,13 @@ const emojiDataUrlCache = new Map<string, string>()
 const imageDataUrlCache = new Map<string, string>()
 const voiceDataUrlCache = new Map<string, string>()
 const voiceTranscriptCache = new Map<string, string>()
-type SharedImageDecryptResult = { success: boolean; localPath?: string; liveVideoPath?: string; error?: string }
+type SharedImageDecryptResult = {
+  success: boolean
+  localPath?: string
+  liveVideoPath?: string
+  error?: string
+  failureKind?: 'not_found' | 'decrypt_failed'
+}
 const imageDecryptInFlight = new Map<string, Promise<SharedImageDecryptResult>>()
 const senderAvatarCache = new Map<string, { avatarUrl?: string; displayName?: string }>()
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
@@ -7892,7 +8152,7 @@ function MessageBubble({
   )
   const imageCacheKey = message.imageMd5 || message.imageDatName || `local:${message.localId}`
   const [imageLocalPath, setImageLocalPath] = useState<string | undefined>(
-    () => imageDataUrlCache.get(imageCacheKey)
+    () => toRenderableImageSrc(imageDataUrlCache.get(imageCacheKey))
   )
   const voiceIdentityKey = buildVoiceCacheIdentity(session.username, message)
   const voiceCacheKey = `voice:${voiceIdentityKey}`
@@ -7914,6 +8174,7 @@ function MessageBubble({
   const imageUpdateCheckedRef = useRef<string | null>(null)
   const imageClickTimerRef = useRef<number | null>(null)
   const imageContainerRef = useRef<HTMLDivElement>(null)
+  const imageElementRef = useRef<HTMLImageElement | null>(null)
   const emojiContainerRef = useRef<HTMLDivElement>(null)
   const imageResizeBaselineRef = useRef<number | null>(null)
   const emojiResizeBaselineRef = useRef<number | null>(null)
@@ -8270,19 +8531,27 @@ function MessageBubble({
             sessionId: session.username,
             imageMd5: message.imageMd5 || undefined,
             imageDatName: message.imageDatName,
-            force: forceUpdate
+            createTime: message.createTime,
+            force: forceUpdate,
+            preferFilePath: true,
+            hardlinkOnly: true
           }) as SharedImageDecryptResult
         })
         if (result.success && result.localPath) {
-          imageDataUrlCache.set(imageCacheKey, result.localPath)
-          if (imageLocalPath !== result.localPath) {
+          const renderPath = toRenderableImageSrc(result.localPath)
+          if (!renderPath) {
+            if (!silent) setImageError(true)
+            return { success: false }
+          }
+          imageDataUrlCache.set(imageCacheKey, renderPath)
+          if (imageLocalPath !== renderPath) {
             captureImageResizeBaseline()
             lockImageStageHeight()
           }
-          setImageLocalPath(result.localPath)
+          setImageLocalPath(renderPath)
           setImageHasUpdate(false)
           if (result.liveVideoPath) setImageLiveVideoPath(result.liveVideoPath)
-          return result
+          return { ...result, localPath: renderPath }
         }
       }
 
@@ -8307,7 +8576,7 @@ function MessageBubble({
       imageDecryptPendingRef.current = false
     }
     return { success: false }
-  }, [isImage, message.imageMd5, message.imageDatName, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64, imageLocalPath, captureImageResizeBaseline, lockImageStageHeight])
+  }, [isImage, message.imageMd5, message.imageDatName, message.createTime, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64, imageLocalPath, captureImageResizeBaseline, lockImageStageHeight])
 
   const triggerForceHd = useCallback(() => {
     if (!message.imageMd5 && !message.imageDatName) return
@@ -8362,24 +8631,29 @@ function MessageBubble({
         const resolved = await window.electronAPI.image.resolveCache({
           sessionId: session.username,
           imageMd5: message.imageMd5 || undefined,
-          imageDatName: message.imageDatName
+          imageDatName: message.imageDatName,
+          createTime: message.createTime,
+          preferFilePath: true,
+          hardlinkOnly: true
         })
         if (resolved?.success && resolved.localPath) {
-          finalImagePath = resolved.localPath
+          const renderPath = toRenderableImageSrc(resolved.localPath)
+          if (!renderPath) return
+          finalImagePath = renderPath
           finalLiveVideoPath = resolved.liveVideoPath || finalLiveVideoPath
-          imageDataUrlCache.set(imageCacheKey, resolved.localPath)
-          if (imageLocalPath !== resolved.localPath) {
+          imageDataUrlCache.set(imageCacheKey, renderPath)
+          if (imageLocalPath !== renderPath) {
             captureImageResizeBaseline()
             lockImageStageHeight()
           }
-          setImageLocalPath(resolved.localPath)
+          setImageLocalPath(renderPath)
           if (resolved.liveVideoPath) setImageLiveVideoPath(resolved.liveVideoPath)
           setImageHasUpdate(Boolean(resolved.hasUpdate))
         }
       } catch { }
     }
 
-    void window.electronAPI.window.openImageViewerWindow(finalImagePath, finalLiveVideoPath)
+    void window.electronAPI.window.openImageViewerWindow(toRenderableImageSrc(finalImagePath) || finalImagePath, finalLiveVideoPath)
   }, [
     imageLiveVideoPath,
     imageLocalPath,
@@ -8388,6 +8662,7 @@ function MessageBubble({
     lockImageStageHeight,
     message.imageDatName,
     message.imageMd5,
+    message.createTime,
     requestImageDecrypt,
     session.username
   ])
@@ -8401,8 +8676,19 @@ function MessageBubble({
   }, [])
 
   useEffect(() => {
-    setImageLoaded(false)
-  }, [imageLocalPath])
+    if (!isImage) return
+    if (!imageLocalPath) {
+      setImageLoaded(false)
+      return
+    }
+
+    // 某些 file:// 缓存图在 src 切换时可能不会稳定触发 onLoad，
+    // 这里用 complete/naturalWidth 做一次兜底，避免图片进入 pending 隐身态。
+    const img = imageElementRef.current
+    if (img && img.complete && img.naturalWidth > 0) {
+      setImageLoaded(true)
+    }
+  }, [isImage, imageLocalPath])
 
   useEffect(() => {
     if (imageLoading) return
@@ -8411,7 +8697,7 @@ function MessageBubble({
   }, [imageError, imageLoading, imageLocalPath])
 
   useEffect(() => {
-    if (!isImage || imageLoading) return
+    if (!isImage || imageLoading || !imageInView) return
     if (!message.imageMd5 && !message.imageDatName) return
     if (imageUpdateCheckedRef.current === imageCacheKey) return
     imageUpdateCheckedRef.current = imageCacheKey
@@ -8419,15 +8705,21 @@ function MessageBubble({
     window.electronAPI.image.resolveCache({
       sessionId: session.username,
       imageMd5: message.imageMd5 || undefined,
-      imageDatName: message.imageDatName
+      imageDatName: message.imageDatName,
+      createTime: message.createTime,
+      preferFilePath: true,
+      hardlinkOnly: true,
+      allowCacheIndex: false
     }).then((result: { success: boolean; localPath?: string; hasUpdate?: boolean; liveVideoPath?: string; error?: string }) => {
       if (cancelled) return
       if (result.success && result.localPath) {
-        imageDataUrlCache.set(imageCacheKey, result.localPath)
-        if (!imageLocalPath || imageLocalPath !== result.localPath) {
+        const renderPath = toRenderableImageSrc(result.localPath)
+        if (!renderPath) return
+        imageDataUrlCache.set(imageCacheKey, renderPath)
+        if (!imageLocalPath || imageLocalPath !== renderPath) {
           captureImageResizeBaseline()
           lockImageStageHeight()
-          setImageLocalPath(result.localPath)
+          setImageLocalPath(renderPath)
           setImageError(false)
         }
         if (result.liveVideoPath) setImageLiveVideoPath(result.liveVideoPath)
@@ -8437,7 +8729,7 @@ function MessageBubble({
     return () => {
       cancelled = true
     }
-  }, [isImage, imageLocalPath, imageLoading, message.imageMd5, message.imageDatName, imageCacheKey, session.username, captureImageResizeBaseline, lockImageStageHeight])
+  }, [isImage, imageInView, imageLocalPath, imageLoading, message.imageMd5, message.imageDatName, message.createTime, imageCacheKey, session.username, captureImageResizeBaseline, lockImageStageHeight])
 
   useEffect(() => {
     if (!isImage) return
@@ -8465,15 +8757,17 @@ function MessageBubble({
         (payload.imageMd5 && payload.imageMd5 === message.imageMd5) ||
         (payload.imageDatName && payload.imageDatName === message.imageDatName)
       if (matchesCacheKey) {
+        const renderPath = toRenderableImageSrc(payload.localPath)
+        if (!renderPath) return
         const cachedPath = imageDataUrlCache.get(imageCacheKey)
-        if (cachedPath !== payload.localPath) {
-          imageDataUrlCache.set(imageCacheKey, payload.localPath)
+        if (cachedPath !== renderPath) {
+          imageDataUrlCache.set(imageCacheKey, renderPath)
         }
-        if (imageLocalPath !== payload.localPath) {
+        if (imageLocalPath !== renderPath) {
           captureImageResizeBaseline()
           lockImageStageHeight()
         }
-        setImageLocalPath((prev) => (prev === payload.localPath ? prev : payload.localPath))
+        setImageLocalPath((prev) => (prev === renderPath ? prev : renderPath))
         setImageError(false)
       }
     })
@@ -9103,6 +9397,7 @@ function MessageBubble({
             <>
               <div className="image-message-wrapper">
                 <img
+                  ref={imageElementRef}
                   src={imageLocalPath}
                   alt="图片"
                   className={`image-message ${imageLoaded ? 'ready' : 'pending'}`}

@@ -1,10 +1,24 @@
-import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
+﻿import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
 
 export interface SessionChatWindowOpenOptions {
   source?: 'chat' | 'export'
   initialDisplayName?: string
   initialAvatarUrl?: string
   initialContactType?: ContactInfo['type']
+}
+
+export interface SocialValidateWeiboUidResult {
+  success: boolean
+  uid?: string
+  screenName?: string
+  error?: string
+}
+
+export interface SocialSaveWeiboCookieResult {
+  success: boolean
+  normalized?: string
+  hasCookie?: boolean
+  error?: string
 }
 
 export interface ElectronAPI {
@@ -491,26 +505,42 @@ export interface ElectronAPI {
   }
 
   image: {
-    decrypt: (payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; force?: boolean }) => Promise<{ success: boolean; localPath?: string; liveVideoPath?: string; error?: string }>
+    decrypt: (payload: {
+      sessionId?: string
+      imageMd5?: string
+      imageDatName?: string
+      createTime?: number
+      force?: boolean
+      preferFilePath?: boolean
+      hardlinkOnly?: boolean
+      disableUpdateCheck?: boolean
+      allowCacheIndex?: boolean
+      suppressEvents?: boolean
+    }) => Promise<{ success: boolean; localPath?: string; liveVideoPath?: string; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
     resolveCache: (payload: {
       sessionId?: string
       imageMd5?: string
       imageDatName?: string
+      createTime?: number
+      preferFilePath?: boolean
+      hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
-    }) => Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; liveVideoPath?: string; error?: string }>
+      suppressEvents?: boolean
+    }) => Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; liveVideoPath?: string; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
     resolveCacheBatch: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean }
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => Promise<{
       success: boolean
-      rows?: Array<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }>
+      rows?: Array<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string; failureKind?: 'not_found' | 'decrypt_failed' }>
       error?: string
     }>
     preload: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
       options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
     ) => Promise<boolean>
+    preloadHardlinkMd5s: (md5List: string[]) => Promise<boolean>
     onUpdateAvailable: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => () => void
     onCacheResolved: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => () => void
     onDecryptProgress: (callback: (payload: {
@@ -955,6 +985,7 @@ export interface ElectronAPI {
       pendingSessionIds?: string[]
       successSessionIds?: string[]
       failedSessionIds?: string[]
+      sessionOutputPaths?: Record<string, string>
       error?: string
     }>
     exportSession: (sessionId: string, outputPath: string, options: ExportOptions) => Promise<{
@@ -1074,6 +1105,10 @@ export interface ElectronAPI {
     start: (port?: number, host?: string) => Promise<{ success: boolean; port?: number; error?: string }>
     stop: () => Promise<{ success: boolean }>
     status: () => Promise<{ running: boolean; port: number; mediaExportPath: string }>
+  }
+  social: {
+    saveWeiboCookie: (rawInput: string) => Promise<SocialSaveWeiboCookieResult>
+    validateWeiboUid: (uid: string) => Promise<SocialValidateWeiboUidResult>
   }
   insight: {
     testConnection: () => Promise<{ success: boolean; message: string }>
@@ -1214,7 +1249,6 @@ export interface ExportOptions {
   sessionNameWithTypePrefix?: boolean
   displayNamePreference?: 'group-nickname' | 'remark' | 'nickname'
   exportConcurrency?: number
-  imageDeepSearchOnMiss?: boolean
 }
 
 export interface ExportProgress {
@@ -1273,3 +1307,6 @@ declare global {
 }
 
 export { }
+
+
+

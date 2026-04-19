@@ -4,7 +4,21 @@ import {
   registerBackgroundTask,
   updateBackgroundTask
 } from '../services/backgroundTaskMonitor'
-import type { BackgroundTaskSourcePage } from '../types/backgroundTask'
+import type { BackgroundTaskSourcePage, BackgroundTaskStatus } from '../types/backgroundTask'
+
+interface BatchDecryptTaskControls {
+  cancelable?: boolean
+  resumable?: boolean
+  onCancel?: () => void | Promise<void>
+  onPause?: () => void | Promise<void>
+  onResume?: () => void | Promise<void>
+}
+
+interface BatchDecryptFinishOptions {
+  status?: Extract<BackgroundTaskStatus, 'completed' | 'failed' | 'canceled'>
+  detail?: string
+  progressText?: string
+}
 
 export interface BatchImageDecryptState {
   isBatchDecrypting: boolean
@@ -16,9 +30,15 @@ export interface BatchImageDecryptState {
   sessionName: string
   taskId: string | null
 
-  startDecrypt: (total: number, sessionName: string, sourcePage?: BackgroundTaskSourcePage) => void
+  startDecrypt: (
+    total: number,
+    sessionName: string,
+    sourcePage?: BackgroundTaskSourcePage,
+    controls?: BatchDecryptTaskControls
+  ) => void
   updateProgress: (current: number, total: number) => void
-  finishDecrypt: (success: number, fail: number) => void
+  setTaskStatus: (detail: string, progressText?: string, status?: BackgroundTaskStatus) => void
+  finishDecrypt: (success: number, fail: number, options?: BatchDecryptFinishOptions) => void
   setShowToast: (show: boolean) => void
   setShowResultToast: (show: boolean) => void
   reset: () => void
@@ -53,7 +73,7 @@ export const useBatchImageDecryptStore = create<BatchImageDecryptState>((set, ge
   sessionName: '',
   taskId: null,
 
-  startDecrypt: (total, sessionName, sourcePage = 'chat') => {
+  startDecrypt: (total, sessionName, sourcePage = 'chat', controls) => {
     const previousTaskId = get().taskId
     if (previousTaskId) {
       taskProgressUpdateMeta.delete(previousTaskId)
@@ -73,7 +93,11 @@ export const useBatchImageDecryptStore = create<BatchImageDecryptState>((set, ge
       title,
       detail: `正在解密图片（${normalizedProgress.current}/${normalizedProgress.total}）`,
       progressText: `${normalizedProgress.current} / ${normalizedProgress.total}`,
-      cancelable: false
+      cancelable: controls?.cancelable !== false,
+      resumable: controls?.resumable === true,
+      onCancel: controls?.onCancel,
+      onPause: controls?.onPause,
+      onResume: controls?.onResume
     })
     taskProgressUpdateMeta.set(taskId, {
       lastAt: Date.now(),
@@ -97,6 +121,7 @@ export const useBatchImageDecryptStore = create<BatchImageDecryptState>((set, ge
     const previousProgress = get().progress
     const normalizedProgress = clampProgress(current, total)
     const taskId = get().taskId
+    let shouldCommitUi = true
     if (taskId) {
       const now = Date.now()
       const meta = taskProgressUpdateMeta.get(taskId)
@@ -105,7 +130,9 @@ export const useBatchImageDecryptStore = create<BatchImageDecryptState>((set, ge
       const intervalReached = !meta || (now - meta.lastAt >= TASK_PROGRESS_UPDATE_MIN_INTERVAL_MS)
       const crossedBucket = !meta || bucket !== meta.lastBucket
       const isFinal = normalizedProgress.total > 0 && normalizedProgress.current >= normalizedProgress.total
-      if (crossedBucket || intervalReached || isFinal) {
+      const shouldPublish = crossedBucket || intervalReached || isFinal
+      shouldCommitUi = shouldPublish
+      if (shouldPublish) {
         updateBackgroundTask(taskId, {
           detail: `正在解密图片（${normalizedProgress.current}/${normalizedProgress.total}）`,
           progressText: `${normalizedProgress.current} / ${normalizedProgress.total}`
@@ -117,26 +144,38 @@ export const useBatchImageDecryptStore = create<BatchImageDecryptState>((set, ge
         })
       }
     }
-    if (
+    if (shouldCommitUi && (
       previousProgress.current !== normalizedProgress.current ||
       previousProgress.total !== normalizedProgress.total
-    ) {
+    )) {
       set({
         progress: normalizedProgress
       })
     }
   },
 
-  finishDecrypt: (success, fail) => {
+  setTaskStatus: (detail, progressText, status) => {
+    const taskId = get().taskId
+    if (!taskId) return
+    const normalizedDetail = String(detail || '').trim()
+    if (!normalizedDetail) return
+    updateBackgroundTask(taskId, {
+      detail: normalizedDetail,
+      progressText,
+      status
+    })
+  },
+
+  finishDecrypt: (success, fail, options) => {
     const taskId = get().taskId
     const normalizedSuccess = Number.isFinite(success) ? Math.max(0, Math.floor(success)) : 0
     const normalizedFail = Number.isFinite(fail) ? Math.max(0, Math.floor(fail)) : 0
     if (taskId) {
       taskProgressUpdateMeta.delete(taskId)
-      const status = normalizedSuccess > 0 || normalizedFail === 0 ? 'completed' : 'failed'
+      const status = options?.status || (normalizedSuccess > 0 || normalizedFail === 0 ? 'completed' : 'failed')
       finishBackgroundTask(taskId, status, {
-        detail: `图片批量解密完成：成功 ${normalizedSuccess}，失败 ${normalizedFail}`,
-        progressText: `成功 ${normalizedSuccess} / 失败 ${normalizedFail}`
+        detail: options?.detail || `图片批量解密完成：成功 ${normalizedSuccess}，失败 ${normalizedFail}`,
+        progressText: options?.progressText || `成功 ${normalizedSuccess} / 失败 ${normalizedFail}`
       })
     }
 

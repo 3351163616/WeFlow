@@ -55,28 +55,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$FIXED_DEV_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$FIXED_DEV_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          fi
-          gh release create "$FIXED_DEV_TAG" --repo "$GITHUB_REPOSITORY" --title "Daily Dev Build" --notes "开发版发布页" --prerelease --target "$TARGET_BRANCH"
-          RELEASE_REST_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$FIXED_DEV_TAG" --jq '.id')"
-          RELEASE_ENDPOINT="repos/$GITHUB_REPOSITORY/releases/tags/$FIXED_DEV_TAG"
-          settled="false"
-          for i in 1 2 3 4 5; do
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_REST_ID" -F draft=false -F prerelease=true >/dev/null 2>&1 || true
-            DRAFT_STATE="$(gh api "$RELEASE_ENDPOINT" --jq '.draft' 2>/dev/null || echo true)"
-            PRERELEASE_STATE="$(gh api "$RELEASE_ENDPOINT" --jq '.prerelease' 2>/dev/null || echo false)"
-            if [ "$DRAFT_STATE" = "false" ] && [ "$PRERELEASE_STATE" = "true" ]; then
-              settled="true"
-              break
-            fi
-            sleep 2
-          done
-          if [ "$settled" != "true" ]; then
-            echo "Failed to settle release state after create:"
-            gh api "$RELEASE_ENDPOINT" --jq '{draft: .draft, prerelease: .prerelease, url: .html_url}'
-            exit 1
-          fi
+          source .github/scripts/release-utils.sh
+          recreate_fixed_prerelease "$GITHUB_REPOSITORY" "$FIXED_DEV_TAG" "$TARGET_BRANCH" "Daily Dev Build" "开发版发布页"
 
   dev-mac-arm64:
     needs: prepare
@@ -93,7 +73,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -128,13 +107,15 @@ jobs:
         run: |
           export ELECTRON_BUILDER_BINARIES_MIRROR="https://github.com/electron-userland/electron-builder-binaries/releases/download/"
           echo "Using ELECTRON_BUILDER_BINARIES_MIRROR=$ELECTRON_BUILDER_BINARIES_MIRROR"
-          npx electron-builder --mac dmg --arm64 --publish never '--config.publish.channel=dev' '--config.artifactName=${productName}-dev-arm64.${ext}'
+          npx electron-builder --mac dmg zip --arm64 --publish never '--config.publish.channel=dev' '--config.artifactName=${productName}-dev-arm64.${ext}'
 
       - name: Upload macOS arm64 assets to fixed release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           assets=()
           while IFS= read -r file; do
             assets+=("$file")
@@ -143,7 +124,7 @@ jobs:
             echo "No release files found in ./release"
             exit 1
           fi
-          gh release upload "$FIXED_DEV_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          upload_release_assets_with_retry "$GITHUB_REPOSITORY" "$FIXED_DEV_TAG" "${assets[@]}"
 
   dev-linux:
     needs: prepare
@@ -160,7 +141,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -183,6 +163,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           assets=()
           while IFS= read -r file; do
             assets+=("$file")
@@ -191,7 +173,7 @@ jobs:
             echo "No release files found in ./release"
             exit 1
           fi
-          gh release upload "$FIXED_DEV_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          upload_release_assets_with_retry "$GITHUB_REPOSITORY" "$FIXED_DEV_TAG" "${assets[@]}"
 
   dev-win-x64:
     needs: prepare
@@ -208,7 +190,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -231,6 +212,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           assets=()
           while IFS= read -r file; do
             assets+=("$file")
@@ -239,7 +222,7 @@ jobs:
             echo "No release files found in ./release"
             exit 1
           fi
-          gh release upload "$FIXED_DEV_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          upload_release_assets_with_retry "$GITHUB_REPOSITORY" "$FIXED_DEV_TAG" "${assets[@]}"
 
   dev-win-arm64:
     needs: prepare
@@ -256,7 +239,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -279,6 +261,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           assets=()
           while IFS= read -r file; do
             assets+=("$file")
@@ -287,7 +271,7 @@ jobs:
             echo "No release files found in ./release"
             exit 1
           fi
-          gh release upload "$FIXED_DEV_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          upload_release_assets_with_retry "$GITHUB_REPOSITORY" "$FIXED_DEV_TAG" "${assets[@]}"
 
   update-dev-release-notes:
     needs:
@@ -386,22 +370,7 @@ jobs:
           }
 
           update_release_notes
-          RELEASE_REST_ID="$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id')"
-          RELEASE_ENDPOINT="repos/$REPO/releases/tags/$TAG"
-          settled="false"
-          for i in 1 2 3 4 5; do
-            gh api --method PATCH "repos/$REPO/releases/$RELEASE_REST_ID" -F draft=false -F prerelease=true >/dev/null 2>&1 || true
-            DRAFT_STATE="$(gh api "$RELEASE_ENDPOINT" --jq '.draft' 2>/dev/null || echo true)"
-            PRERELEASE_STATE="$(gh api "$RELEASE_ENDPOINT" --jq '.prerelease' 2>/dev/null || echo false)"
-            if [ "$DRAFT_STATE" = "false" ] && [ "$PRERELEASE_STATE" = "true" ]; then
-              settled="true"
-              break
-            fi
-            sleep 2
-          done
-          if [ "$settled" != "true" ]; then
-            echo "Failed to settle release state after notes update:"
-            gh api "$RELEASE_ENDPOINT" --jq '{draft: .draft, prerelease: .prerelease, url: .html_url}'
-            exit 1
-          fi
+          source .github/scripts/release-utils.sh
+          RELEASE_REST_ID="$(wait_for_release_id "$REPO" "$TAG" 12 2)"
+          settle_release_state "$REPO" "$RELEASE_REST_ID" "$TAG" 12 2
           gh api "repos/$REPO/releases/tags/$TAG" --jq '{isDraft: .draft, isPrerelease: .prerelease, url: .html_url}'

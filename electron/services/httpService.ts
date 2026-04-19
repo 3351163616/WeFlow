@@ -1208,6 +1208,30 @@ class HttpService {
     const sessionDir = path.join(this.getApiMediaExportPath(), this.sanitizeFileName(talker, 'session'))
     this.ensureDir(sessionDir)
 
+    // 预热图片 hardlink 索引，减少逐条导出时的查找开销
+    if (options.exportImages) {
+      const imageMd5Set = new Set<string>()
+      for (const msg of messages) {
+        if (msg.localType !== 3) continue
+        const imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase()
+        if (imageMd5) {
+          imageMd5Set.add(imageMd5)
+          continue
+        }
+        const imageDatName = String(msg.imageDatName || '').trim().toLowerCase()
+        if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
+          imageMd5Set.add(imageDatName)
+        }
+      }
+      if (imageMd5Set.size > 0) {
+        try {
+          await imageDecryptService.preloadImageHardlinkMd5s(Array.from(imageMd5Set))
+        } catch {
+          // ignore preload failures
+        }
+      }
+    }
+
     for (const msg of messages) {
       const exported = await this.exportMediaForMessage(msg, talker, sessionDir, options)
       if (exported) {
@@ -1230,27 +1254,54 @@ class HttpService {
           sessionId: talker,
           imageMd5: msg.imageMd5,
           imageDatName: msg.imageDatName,
-          force: true
+          createTime: msg.createTime,
+          force: true,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          disableUpdateCheck: true,
+          suppressEvents: true
         })
-        if (result.success && result.localPath) {
-          let imagePath = result.localPath
+
+        let imagePath = result.success ? result.localPath : undefined
+        if (!imagePath) {
+          try {
+            const cached = await imageDecryptService.resolveCachedImage({
+              sessionId: talker,
+              imageMd5: msg.imageMd5,
+              imageDatName: msg.imageDatName,
+              createTime: msg.createTime,
+              preferFilePath: true,
+              hardlinkOnly: true,
+              disableUpdateCheck: true,
+              suppressEvents: true
+            })
+            if (cached.success && cached.localPath) {
+              imagePath = cached.localPath
+            }
+          } catch {
+            // ignore resolve failures
+          }
+        }
+
+        if (imagePath) {
           if (imagePath.startsWith('data:')) {
             const base64Match = imagePath.match(/^data:[^;]+;base64,(.+)$/)
-            if (base64Match) {
-              const imageBuffer = Buffer.from(base64Match[1], 'base64')
-              const ext = this.detectImageExt(imageBuffer)
-              const fileBase = this.sanitizeFileName(msg.imageMd5 || msg.imageDatName || `image_${msg.localId}`, `image_${msg.localId}`)
-              const fileName = `${fileBase}${ext}`
-              const targetDir = path.join(sessionDir, 'images')
-              const fullPath = path.join(targetDir, fileName)
-              this.ensureDir(targetDir)
-              if (!fs.existsSync(fullPath)) {
-                fs.writeFileSync(fullPath, imageBuffer)
-              }
-              const relativePath = `${this.sanitizeFileName(talker, 'session')}/images/${fileName}`
-              return { kind: 'image', fileName, fullPath, relativePath }
+            if (!base64Match) return null
+            const imageBuffer = Buffer.from(base64Match[1], 'base64')
+            const ext = this.detectImageExt(imageBuffer)
+            const fileBase = this.sanitizeFileName(msg.imageMd5 || msg.imageDatName || `image_${msg.localId}`, `image_${msg.localId}`)
+            const fileName = `${fileBase}${ext}`
+            const targetDir = path.join(sessionDir, 'images')
+            const fullPath = path.join(targetDir, fileName)
+            this.ensureDir(targetDir)
+            if (!fs.existsSync(fullPath)) {
+              fs.writeFileSync(fullPath, imageBuffer)
             }
-          } else if (fs.existsSync(imagePath)) {
+            const relativePath = `${this.sanitizeFileName(talker, 'session')}/images/${fileName}`
+            return { kind: 'image', fileName, fullPath, relativePath }
+          }
+
+          if (fs.existsSync(imagePath)) {
             const imageBuffer = fs.readFileSync(imagePath)
             const ext = this.detectImageExt(imageBuffer)
             const fileBase = this.sanitizeFileName(msg.imageMd5 || msg.imageDatName || `image_${msg.localId}`, `image_${msg.localId}`)

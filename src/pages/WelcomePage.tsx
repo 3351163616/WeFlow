@@ -56,43 +56,28 @@ const normalizeDbKeyStatusMessage = (message: string): string => {
   return message
 }
 
-const isDbKeyReadyMessage = (message: string): boolean => (
-  message.includes('现在可以登录')
-  || message.includes('Hook安装成功')
-  || message.includes('已准备就绪，现在登录微信或退出登录后重新登录微信')
-)
+const isDbKeyReadyMessage = (message: string): boolean => {
+  if (isWindows) {
+    return message.includes('现在可以登录')
+      || message.includes('Hook安装成功')
+      || message.includes('已准备就绪，现在登录微信或退出登录后重新登录微信')
+  }
+  return message.includes('现在可以登录')
+}
 
-const pickWxidByAnchorTime = (
-  wxids: Array<{ wxid: string; modifiedTime: number }>,
-  anchorTime?: number
+const pickLatestWxid = (
+  wxids: Array<{ wxid: string; modifiedTime: number }>
 ): string => {
   if (!Array.isArray(wxids) || wxids.length === 0) return ''
   const fallbackWxid = wxids[0]?.wxid || ''
-  if (!anchorTime || !Number.isFinite(anchorTime)) return fallbackWxid
-
   const valid = wxids.filter(item => Number.isFinite(item.modifiedTime) && item.modifiedTime > 0)
   if (valid.length === 0) return fallbackWxid
 
-  const anchor = Number(anchorTime)
-  const nearWindowMs = 10 * 60 * 1000
-
-  const near = valid
-    .filter(item => Math.abs(item.modifiedTime - anchor) <= nearWindowMs)
-    .sort((a, b) => {
-      const diffGap = Math.abs(a.modifiedTime - anchor) - Math.abs(b.modifiedTime - anchor)
-      if (diffGap !== 0) return diffGap
-      if (b.modifiedTime !== a.modifiedTime) return b.modifiedTime - a.modifiedTime
-      return a.wxid.localeCompare(b.wxid)
-    })
-  if (near.length > 0) return near[0].wxid
-
-  const closest = valid.sort((a, b) => {
-    const diffGap = Math.abs(a.modifiedTime - anchor) - Math.abs(b.modifiedTime - anchor)
-    if (diffGap !== 0) return diffGap
+  const latest = [...valid].sort((a, b) => {
     if (b.modifiedTime !== a.modifiedTime) return b.modifiedTime - a.modifiedTime
     return a.wxid.localeCompare(b.wxid)
   })
-  return closest[0]?.wxid || fallbackWxid
+  return latest[0]?.wxid || fallbackWxid
 }
 
 function WelcomePage({ standalone = false }: WelcomePageProps) {
@@ -434,7 +419,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     }
   }
 
-  const handleScanWxid = async (silent = false, anchorTime?: number) => {
+  const handleScanWxid = async (silent = false) => {
     if (!dbPath) {
       if (!silent) setError('请先选择数据库目录')
       return
@@ -446,9 +431,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       const wxids = await window.electronAPI.dbPath.scanWxids(dbPath)
       setWxidOptions(wxids)
       if (wxids.length > 0) {
-        // 密钥成功后使用成功时刻作为锚点，自动选择最接近该时刻的活跃账号；
-        // 其余场景保持“时间最新”优先。
-        const selectedWxid = pickWxidByAnchorTime(wxids, anchorTime)
+        // 自动获取密钥后，始终优先选择最近活跃（modifiedTime 最新）的账号。
+        const selectedWxid = pickLatestWxid(wxids)
         setWxid(selectedWxid || wxids[0].wxid)
         if (!silent) setError('')
       } else {
@@ -501,8 +485,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         setHasReacquiredDbKey(true)
         setDbKeyStatus('密钥获取成功')
         setError('')
-        const keySuccessAt = Date.now()
-        await handleScanWxid(true, keySuccessAt)
+        await handleScanWxid(true)
       } else {
         if (isAddAccountMode) {
           setHasReacquiredDbKey(false)

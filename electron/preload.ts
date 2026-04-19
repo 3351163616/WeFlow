@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+﻿import { contextBridge, ipcRenderer } from 'electron'
 
 // 暴露给渲染进程的 API
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -286,24 +286,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 图片解密
   image: {
-    decrypt: (payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; force?: boolean }) =>
+    decrypt: (payload: {
+      sessionId?: string
+      imageMd5?: string
+      imageDatName?: string
+      createTime?: number
+      force?: boolean
+      preferFilePath?: boolean
+      hardlinkOnly?: boolean
+      disableUpdateCheck?: boolean
+      allowCacheIndex?: boolean
+      suppressEvents?: boolean
+    }) =>
       ipcRenderer.invoke('image:decrypt', payload),
     resolveCache: (payload: {
       sessionId?: string
       imageMd5?: string
       imageDatName?: string
+      createTime?: number
+      preferFilePath?: boolean
+      hardlinkOnly?: boolean
       disableUpdateCheck?: boolean
       allowCacheIndex?: boolean
+      suppressEvents?: boolean
     }) =>
       ipcRenderer.invoke('image:resolveCache', payload),
     resolveCacheBatch: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean }
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number; preferFilePath?: boolean; hardlinkOnly?: boolean }>,
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => ipcRenderer.invoke('image:resolveCacheBatch', payloads, options),
     preload: (
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
       options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
     ) => ipcRenderer.invoke('image:preload', payloads, options),
+    preloadHardlinkMd5s: (md5List: string[]) =>
+      ipcRenderer.invoke('image:preloadHardlinkMd5s', md5List),
     onUpdateAvailable: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => {
       const listener = (_: unknown, payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => callback(payload)
       ipcRenderer.on('image:updateAvailable', listener)
@@ -660,5 +677,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ai: {
     testConnection: (config: { provider: 'openai' | 'anthropic'; apiBaseUrl: string; apiKey: string; model: string }) =>
       ipcRenderer.invoke('ai:testConnection', config)
+  },
+  // 社交上下文：微博
+  social: {
+    saveWeiboCookie: (rawInput: string) => ipcRenderer.invoke('social:saveWeiboCookie', rawInput),
+    validateWeiboUid: (uid: string) => ipcRenderer.invoke('social:validateWeiboUid', uid)
   }
 })
+

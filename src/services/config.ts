@@ -1,4 +1,4 @@
-// 配置服务 - 封装 Electron Store
+﻿// 配置服务 - 封装 Electron Store
 import { config } from './ipc'
 import type { ExportDefaultDateRangeConfig } from '../utils/exportDateRange'
 import type { ExportAutomationTask } from '../types/exportAutomation'
@@ -37,7 +37,6 @@ export const CONFIG_KEYS = {
   EXPORT_DEFAULT_EXCEL_COMPACT_COLUMNS: 'exportDefaultExcelCompactColumns',
   EXPORT_DEFAULT_TXT_COLUMNS: 'exportDefaultTxtColumns',
   EXPORT_DEFAULT_CONCURRENCY: 'exportDefaultConcurrency',
-  EXPORT_DEFAULT_IMAGE_DEEP_SEARCH_ON_MISS: 'exportDefaultImageDeepSearchOnMiss',
   EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
   EXPORT_SESSION_NAME_PREFIX_ENABLED: 'exportSessionNamePrefixEnabled',
   EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
@@ -90,21 +89,26 @@ export const CONFIG_KEYS = {
   AI_MODEL_API_BASE_URL: 'aiModelApiBaseUrl',
   AI_MODEL_API_KEY: 'aiModelApiKey',
   AI_MODEL_API_MODEL: 'aiModelApiModel',
+  AI_MODEL_API_MAX_TOKENS: 'aiModelApiMaxTokens',
   AI_INSIGHT_ENABLED: 'aiInsightEnabled',
   AI_INSIGHT_API_BASE_URL: 'aiInsightApiBaseUrl',
   AI_INSIGHT_API_KEY: 'aiInsightApiKey',
   AI_INSIGHT_API_MODEL: 'aiInsightApiModel',
   AI_INSIGHT_SILENCE_DAYS: 'aiInsightSilenceDays',
   AI_INSIGHT_ALLOW_CONTEXT: 'aiInsightAllowContext',
+  AI_INSIGHT_ALLOW_SOCIAL_CONTEXT: 'aiInsightAllowSocialContext',
   AI_INSIGHT_WHITELIST_ENABLED: 'aiInsightWhitelistEnabled',
   AI_INSIGHT_WHITELIST: 'aiInsightWhitelist',
   AI_INSIGHT_COOLDOWN_MINUTES: 'aiInsightCooldownMinutes',
   AI_INSIGHT_SCAN_INTERVAL_HOURS: 'aiInsightScanIntervalHours',
   AI_INSIGHT_CONTEXT_COUNT: 'aiInsightContextCount',
+  AI_INSIGHT_SOCIAL_CONTEXT_COUNT: 'aiInsightSocialContextCount',
   AI_INSIGHT_SYSTEM_PROMPT: 'aiInsightSystemPrompt',
   AI_INSIGHT_TELEGRAM_ENABLED: 'aiInsightTelegramEnabled',
   AI_INSIGHT_TELEGRAM_TOKEN: 'aiInsightTelegramToken',
   AI_INSIGHT_TELEGRAM_CHAT_IDS: 'aiInsightTelegramChatIds',
+  AI_INSIGHT_WEIBO_COOKIE: 'aiInsightWeiboCookie',
+  AI_INSIGHT_WEIBO_BINDINGS: 'aiInsightWeiboBindings',
 
   // AI 足迹
   AI_FOOTPRINT_ENABLED: 'aiFootprintEnabled',
@@ -117,6 +121,12 @@ export interface WxidConfig {
   imageXorKey?: number
   imageAesKey?: string
   updatedAt?: number
+}
+
+export interface AiInsightWeiboBinding {
+  uid: string
+  screenName?: string
+  updatedAt: number
 }
 
 export interface ExportDefaultMediaConfig {
@@ -548,18 +558,6 @@ export async function setExportDefaultConcurrency(concurrency: number): Promise<
   await config.set(CONFIG_KEYS.EXPORT_DEFAULT_CONCURRENCY, concurrency)
 }
 
-// 获取缺图时是否深度搜索（默认导出行为）
-export async function getExportDefaultImageDeepSearchOnMiss(): Promise<boolean | null> {
-  const value = await config.get(CONFIG_KEYS.EXPORT_DEFAULT_IMAGE_DEEP_SEARCH_ON_MISS)
-  if (typeof value === 'boolean') return value
-  return null
-}
-
-// 设置缺图时是否深度搜索（默认导出行为）
-export async function setExportDefaultImageDeepSearchOnMiss(enabled: boolean): Promise<void> {
-  await config.set(CONFIG_KEYS.EXPORT_DEFAULT_IMAGE_DEEP_SEARCH_ON_MISS, enabled)
-}
-
 export type ExportWriteLayout = 'A' | 'B' | 'C'
 
 export async function getExportWriteLayout(): Promise<ExportWriteLayout> {
@@ -702,11 +700,17 @@ const normalizeAutomationTask = (raw: unknown): ExportAutomationTask | null => {
   if (scheduleType === 'interval') {
     const rawDays = Math.max(0, normalizeAutomationNumeric(scheduleObj.intervalDays, 0))
     const rawHours = Math.max(0, normalizeAutomationNumeric(scheduleObj.intervalHours, 0))
+    const rawFirstTriggerAt = Math.max(0, normalizeAutomationNumeric(scheduleObj.firstTriggerAt, 0))
     const totalHours = (rawDays * 24) + rawHours
     if (totalHours <= 0) return null
     const intervalDays = Math.floor(totalHours / 24)
     const intervalHours = totalHours % 24
-    schedule = { type: 'interval', intervalDays, intervalHours }
+    schedule = {
+      type: 'interval',
+      intervalDays,
+      intervalHours,
+      firstTriggerAt: rawFirstTriggerAt > 0 ? rawFirstTriggerAt : undefined
+    }
   }
   if (!schedule) return null
 
@@ -1835,6 +1839,21 @@ export async function setAiModelApiModel(model: string): Promise<void> {
   await config.set(CONFIG_KEYS.AI_MODEL_API_MODEL, model)
 }
 
+export async function getAiModelApiMaxTokens(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.AI_MODEL_API_MAX_TOKENS)
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value)
+  }
+  return 200
+}
+
+export async function setAiModelApiMaxTokens(maxTokens: number): Promise<void> {
+  const normalized = Number.isFinite(maxTokens)
+    ? Math.min(65535, Math.max(1, Math.floor(maxTokens)))
+    : 200
+  await config.set(CONFIG_KEYS.AI_MODEL_API_MAX_TOKENS, normalized)
+}
+
 export async function getAiInsightEnabled(): Promise<boolean> {
   const value = await config.get(CONFIG_KEYS.AI_INSIGHT_ENABLED)
   return value === true
@@ -1889,6 +1908,15 @@ export async function setAiInsightAllowContext(allow: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_ALLOW_CONTEXT, allow)
 }
 
+export async function getAiInsightAllowSocialContext(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_ALLOW_SOCIAL_CONTEXT)
+  return value === true
+}
+
+export async function setAiInsightAllowSocialContext(allow: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_ALLOW_SOCIAL_CONTEXT, allow)
+}
+
 export async function getAiInsightWhitelistEnabled(): Promise<boolean> {
   const value = await config.get(CONFIG_KEYS.AI_INSIGHT_WHITELIST_ENABLED)
   return value === true
@@ -1934,6 +1962,15 @@ export async function setAiInsightContextCount(count: number): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_CONTEXT_COUNT, count)
 }
 
+export async function getAiInsightSocialContextCount(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_SOCIAL_CONTEXT_COUNT)
+  return typeof value === 'number' && value > 0 ? value : 3
+}
+
+export async function setAiInsightSocialContextCount(count: number): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_SOCIAL_CONTEXT_COUNT, count)
+}
+
 export async function getAiInsightSystemPrompt(): Promise<string> {
   const value = await config.get(CONFIG_KEYS.AI_INSIGHT_SYSTEM_PROMPT)
   return typeof value === 'string' ? value : ''
@@ -1970,6 +2007,25 @@ export async function setAiInsightTelegramChatIds(chatIds: string): Promise<void
   await config.set(CONFIG_KEYS.AI_INSIGHT_TELEGRAM_CHAT_IDS, chatIds)
 }
 
+export async function getAiInsightWeiboCookie(): Promise<string> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_WEIBO_COOKIE)
+  return typeof value === 'string' ? value : ''
+}
+
+export async function setAiInsightWeiboCookie(cookieValue: string): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_WEIBO_COOKIE, cookieValue)
+}
+
+export async function getAiInsightWeiboBindings(): Promise<Record<string, AiInsightWeiboBinding>> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_WEIBO_BINDINGS)
+  if (!value || typeof value !== 'object') return {}
+  return value as Record<string, AiInsightWeiboBinding>
+}
+
+export async function setAiInsightWeiboBindings(bindings: Record<string, AiInsightWeiboBinding>): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_WEIBO_BINDINGS, bindings)
+}
+
 export async function getAiFootprintEnabled(): Promise<boolean> {
   const value = await config.get(CONFIG_KEYS.AI_FOOTPRINT_ENABLED)
   return value === true
@@ -1996,3 +2052,4 @@ export async function getAiInsightDebugLogEnabled(): Promise<boolean> {
 export async function setAiInsightDebugLogEnabled(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_DEBUG_LOG_ENABLED, enabled)
 }
+

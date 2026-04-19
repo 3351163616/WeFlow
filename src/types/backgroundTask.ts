@@ -9,6 +9,8 @@ export type BackgroundTaskSourcePage =
 
 export type BackgroundTaskStatus =
   | 'running'
+  | 'pause_requested'
+  | 'paused'
   | 'cancel_requested'
   | 'completed'
   | 'failed'
@@ -21,7 +23,9 @@ export interface BackgroundTaskRecord {
   detail?: string
   progressText?: string
   cancelable: boolean
+  resumable: boolean
   cancelRequested: boolean
+  pauseRequested: boolean
   status: BackgroundTaskStatus
   startedAt: number
   updatedAt: number
@@ -34,7 +38,10 @@ export interface BackgroundTaskInput {
   detail?: string
   progressText?: string
   cancelable?: boolean
+  resumable?: boolean
   onCancel?: () => void | Promise<void>
+  onPause?: () => void | Promise<void>
+  onResume?: () => void | Promise<void>
 }
 
 export interface BackgroundTaskUpdate {

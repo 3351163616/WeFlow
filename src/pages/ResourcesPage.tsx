@@ -1,5 +1,5 @@
 import { forwardRef, memo, useCallback, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
-import { Calendar, Image as ImageIcon, Loader2, PlayCircle, RefreshCw, Trash2, UserRound } from 'lucide-react'
+import { Calendar, Image as ImageIcon, Info, Loader2, PlayCircle, RefreshCw, Trash2, UserRound } from 'lucide-react'
 import { VirtuosoGrid } from 'react-virtuoso'
 import { finishBackgroundTask, registerBackgroundTask, updateBackgroundTask } from '../services/backgroundTaskMonitor'
 import './ResourcesPage.scss'
@@ -28,9 +28,10 @@ interface ContactOption {
 }
 
 type DialogState = {
-  mode: 'alert' | 'confirm'
+  mode: 'alert' | 'confirm' | 'info'
   title: string
-  message: string
+  message?: string
+  infoRows?: Array<{ label: string; value: string }>
   confirmText?: string
   cancelText?: string
   onConfirm?: (() => void) | null
@@ -44,6 +45,7 @@ const INITIAL_IMAGE_PRELOAD_END = 48
 const INITIAL_IMAGE_RESOLVE_END = 12
 const TASK_PROGRESS_UPDATE_MIN_INTERVAL_MS = 250
 const TASK_PROGRESS_UPDATE_MAX_STEPS = 100
+const BATCH_IMAGE_DECRYPT_CONCURRENCY = 8
 
 const GridList = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(function GridList(props, ref) {
   const { className = '', ...rest } = props
@@ -71,6 +73,20 @@ function getRangeTimestampEnd(date: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+function normalizeMediaToken(value?: string): string {
+  return String(value || '').trim().toLowerCase()
+}
+
+function getSafeImageDatName(item: Pick<MediaStreamItem, 'imageDatName' | 'imageMd5'>): string {
+  const datName = normalizeMediaToken(item.imageDatName)
+  if (!datName) return ''
+  return datName
+}
+
+function hasImageLocator(item: Pick<MediaStreamItem, 'imageDatName' | 'imageMd5'>): boolean {
+  return Boolean(normalizeMediaToken(item.imageMd5) || getSafeImageDatName(item))
+}
+
 function getItemKey(item: MediaStreamItem): string {
   const sessionId = String(item.sessionId || '').trim().toLowerCase()
   const localId = Number(item.localId || 0)
@@ -84,7 +100,7 @@ function getItemKey(item: MediaStreamItem): string {
   const mediaId = String(
     item.mediaType === 'video'
       ? (item.videoMd5 || '')
-      : (item.imageMd5 || item.imageDatName || '')
+      : (item.imageMd5 || getSafeImageDatName(item) || '')
   ).trim().toLowerCase()
   return `${sessionId}|${createTime}|${localType}|${serverId}|${mediaId}`
 }
@@ -98,6 +114,12 @@ function formatTimeLabel(timestampSec: number): string {
     hour: '2-digit',
     minute: '2-digit'
   })
+}
+
+function formatInfoValue(value: unknown): string {
+  if (value === null || value === undefined) return '-'
+  const text = String(value).trim()
+  return text || '-'
 }
 
 function extractVideoTitle(content?: string): string {
@@ -137,6 +159,7 @@ const MediaCard = memo(function MediaCard({
   decrypting,
   onToggleSelect,
   onDelete,
+  onShowInfo,
   onImagePreviewAction,
   onUpdateImageQuality,
   onOpenVideo,
@@ -152,6 +175,7 @@ const MediaCard = memo(function MediaCard({
   decrypting: boolean
   onToggleSelect: (item: MediaStreamItem) => void
   onDelete: (item: MediaStreamItem) => void
+  onShowInfo: (item: MediaStreamItem) => void
   onImagePreviewAction: (item: MediaStreamItem) => void
   onUpdateImageQuality: (item: MediaStreamItem) => void
   onOpenVideo: (item: MediaStreamItem) => void
@@ -163,6 +187,9 @@ const MediaCard = memo(function MediaCard({
 
   return (
     <article className={`media-card ${selected ? 'selected' : ''} ${isDecryptingVisual ? 'decrypting' : ''}`}>
+      <button type="button" className="floating-info" onClick={() => onShowInfo(item)} aria-label="查看资源信息">
+        <Info size={14} />
+      </button>
       <button type="button" className="floating-delete" onClick={() => onDelete(item)} aria-label="删除资源">
         <Trash2 size={14} />
       </button>
@@ -658,19 +685,20 @@ function ResourcesPage() {
     const to = Math.min(displayItems.length - 1, end)
     if (to < from) return
     const now = Date.now()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }> = []
+    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
     const itemKeys: string[] = []
     for (let i = from; i <= to; i += 1) {
       const item = displayItems[i]
       if (!item || item.mediaType !== 'image') continue
       const itemKey = getItemKey(item)
       if (previewPathMapRef.current[itemKey] || previewPatchRef.current[itemKey]) continue
-      if (!item.imageMd5 && !item.imageDatName) continue
+      if (!hasImageLocator(item)) continue
       if ((imageCacheMissUntilRef.current[itemKey] || 0) > now) continue
       payloads.push({
         sessionId: item.sessionId,
-        imageMd5: item.imageMd5 || undefined,
-        imageDatName: item.imageDatName || undefined
+        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+        imageDatName: getSafeImageDatName(item) || undefined,
+        createTime: Number(item.createTime || 0) || undefined
       })
       itemKeys.push(itemKey)
       if (payloads.length >= MAX_IMAGE_CACHE_RESOLVE_PER_TICK) break
@@ -686,7 +714,10 @@ function ResourcesPage() {
       try {
         const result = await window.electronAPI.image.resolveCacheBatch(payloads, {
           disableUpdateCheck: true,
-          allowCacheIndex: false
+          allowCacheIndex: true,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          suppressEvents: true
         })
         const rows = Array.isArray(result?.rows) ? result.rows : []
         const pathPatch: Record<string, string> = {}
@@ -733,30 +764,31 @@ function ResourcesPage() {
     if (to < from) return
 
     const now = Date.now()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }> = []
+    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
     const dedup = new Set<string>()
     for (let i = from; i <= to; i += 1) {
       const item = displayItems[i]
       if (!item || item.mediaType !== 'image') continue
       const itemKey = getItemKey(item)
       if (previewPathMapRef.current[itemKey] || previewPatchRef.current[itemKey]) continue
-      if (!item.imageMd5 && !item.imageDatName) continue
+      if (!hasImageLocator(item)) continue
       if ((imagePreloadUntilRef.current[itemKey] || 0) > now) continue
-      const dedupKey = `${item.sessionId || ''}|${item.imageMd5 || ''}|${item.imageDatName || ''}`
+      const dedupKey = `${item.sessionId || ''}|${normalizeMediaToken(item.imageMd5)}|${getSafeImageDatName(item)}`
       if (dedup.has(dedupKey)) continue
       dedup.add(dedupKey)
       imagePreloadUntilRef.current[itemKey] = now + 12000
       payloads.push({
         sessionId: item.sessionId,
-        imageMd5: item.imageMd5 || undefined,
-        imageDatName: item.imageDatName || undefined
+        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+        imageDatName: getSafeImageDatName(item) || undefined,
+        createTime: Number(item.createTime || 0) || undefined
       })
       if (payloads.length >= MAX_IMAGE_CACHE_PRELOAD_PER_TICK) break
     }
     if (payloads.length === 0) return
     void window.electronAPI.image.preload(payloads, {
       allowDecrypt: false,
-      allowCacheIndex: false
+      allowCacheIndex: true
     })
   }, [displayItems])
 
@@ -775,6 +807,93 @@ function ResourcesPage() {
     if (md5) resolvedVideoMd5Ref.current[itemKey] = md5
     return md5
   }, [])
+
+  const showMediaInfo = useCallback(async (item: MediaStreamItem) => {
+    const itemKey = getItemKey(item)
+    const mediaLabel = item.mediaType === 'image' ? '图片' : '视频'
+    const baseRows: Array<{ label: string; value: string }> = [
+      { label: '资源类型', value: mediaLabel },
+      { label: '会话 ID', value: formatInfoValue(item.sessionId) },
+      { label: '消息 LocalId', value: formatInfoValue(item.localId) },
+      { label: '消息时间', value: formatTimeLabel(item.createTime) },
+      { label: '发送方', value: formatInfoValue(item.senderUsername) },
+      { label: '是否我发送', value: item.isSend === 1 ? '是' : (item.isSend === 0 ? '否' : '-') }
+    ]
+
+    setDialog({
+      mode: 'info',
+      title: `${mediaLabel}信息`,
+      infoRows: [...baseRows, { label: '状态', value: '正在读取缓存信息...' }],
+      confirmText: '关闭',
+      onConfirm: null
+    })
+
+    try {
+      if (item.mediaType === 'image') {
+        const resolved = await window.electronAPI.image.resolveCache({
+          sessionId: item.sessionId,
+          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+          imageDatName: getSafeImageDatName(item) || undefined,
+          createTime: Number(item.createTime || 0) || undefined,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          allowCacheIndex: true,
+          suppressEvents: true
+        })
+        const previewPath = previewPathMapRef.current[itemKey] || previewPatchRef.current[itemKey] || ''
+        const cachePath = String(resolved?.localPath || previewPath || '').trim()
+        const rows: Array<{ label: string; value: string }> = [
+          ...baseRows,
+          { label: 'imageMd5', value: formatInfoValue(normalizeMediaToken(item.imageMd5)) },
+          { label: 'imageDatName', value: formatInfoValue(getSafeImageDatName(item)) },
+          { label: '列表预览路径', value: formatInfoValue(previewPath) },
+          { label: '缓存命中', value: resolved?.success && cachePath ? '是' : '否' },
+          { label: '缓存路径', value: formatInfoValue(cachePath) },
+          { label: '缓存可更新', value: resolved?.hasUpdate ? '是' : '否' },
+          { label: '缓存状态', value: resolved?.success ? '可用' : formatInfoValue(resolved?.error || resolved?.failureKind || '未命中') }
+        ]
+        setDialog({
+          mode: 'info',
+          title: '图片信息',
+          infoRows: rows,
+          confirmText: '关闭',
+          onConfirm: null
+        })
+        return
+      }
+
+      const resolvedMd5 = await resolveItemVideoMd5(item)
+      const videoInfo = resolvedMd5
+        ? await window.electronAPI.video.getVideoInfo(resolvedMd5, { includePoster: true, posterFormat: 'fileUrl' })
+        : null
+      const posterPath = videoPosterMapRef.current[itemKey] || posterPatchRef.current[itemKey] || ''
+      const rows: Array<{ label: string; value: string }> = [
+        ...baseRows,
+        { label: 'videoMd5(消息)', value: formatInfoValue(normalizeMediaToken(item.videoMd5)) },
+        { label: 'videoMd5(解析)', value: formatInfoValue(resolvedMd5) },
+        { label: '视频文件存在', value: videoInfo?.success && videoInfo.exists ? '是' : '否' },
+        { label: '视频路径', value: formatInfoValue(videoInfo?.videoUrl) },
+        { label: '同名封面路径', value: formatInfoValue(videoInfo?.coverUrl) },
+        { label: '列表封面路径', value: formatInfoValue(posterPath) },
+        { label: '视频状态', value: videoInfo?.success ? '可用' : formatInfoValue(videoInfo?.error || '未找到') }
+      ]
+      setDialog({
+        mode: 'info',
+        title: '视频信息',
+        infoRows: rows,
+        confirmText: '关闭',
+        onConfirm: null
+      })
+    } catch (e) {
+      setDialog({
+        mode: 'info',
+        title: `${mediaLabel}信息`,
+        infoRows: [...baseRows, { label: '读取失败', value: formatInfoValue(String(e)) }],
+        confirmText: '关闭',
+        onConfirm: null
+      })
+    }
+  }, [resolveItemVideoMd5])
 
   const resolveVideoPoster = useCallback(async (item: MediaStreamItem) => {
     if (item.mediaType !== 'video') return
@@ -795,7 +914,7 @@ function ResourcesPage() {
         attemptedVideoPosterKeysRef.current.add(itemKey)
         return
       }
-      const poster = String(info.coverUrl || info.thumbUrl || '')
+      const poster = String(info.coverUrl || '')
       if (!poster) {
         attemptedVideoPosterKeysRef.current.add(itemKey)
         return
@@ -954,11 +1073,14 @@ function ResourcesPage() {
     }, '批量删除确认')
   }, [batchBusy, selectedItems, showAlert, showConfirm])
 
-  const decryptImage = useCallback(async (item: MediaStreamItem): Promise<string | undefined> => {
+  const decryptImage = useCallback(async (
+    item: MediaStreamItem,
+    options?: { allowCacheIndex?: boolean }
+  ): Promise<string | undefined> => {
     if (item.mediaType !== 'image') return
 
     const key = getItemKey(item)
-    if (!item.imageMd5 && !item.imageDatName) {
+    if (!hasImageLocator(item)) {
       showAlert('当前图片缺少解密所需字段（imageMd5/imageDatName）', '无法解密')
       return
     }
@@ -972,12 +1094,21 @@ function ResourcesPage() {
     try {
       const result = await window.electronAPI.image.decrypt({
         sessionId: item.sessionId,
-        imageMd5: item.imageMd5 || undefined,
-        imageDatName: item.imageDatName || undefined,
-        force: true
+        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+        imageDatName: getSafeImageDatName(item) || undefined,
+        createTime: Number(item.createTime || 0) || undefined,
+        force: true,
+        preferFilePath: true,
+        hardlinkOnly: true,
+        allowCacheIndex: options?.allowCacheIndex ?? true,
+        suppressEvents: true
       })
       if (!result?.success) {
-        showAlert(`解密失败：${result?.error || '未知错误'}`, '解密失败')
+        if (result?.failureKind === 'decrypt_failed') {
+          showAlert(`解密失败：${result?.error || '解密后不是有效图片'}`, '解密失败')
+        } else {
+          showAlert(`本地无数据：${result?.error || '未找到原始 DAT 文件'}`, '未找到本地数据')
+        }
         return undefined
       }
 
@@ -991,8 +1122,13 @@ function ResourcesPage() {
       try {
         const resolved = await window.electronAPI.image.resolveCache({
           sessionId: item.sessionId,
-          imageMd5: item.imageMd5 || undefined,
-          imageDatName: item.imageDatName || undefined
+          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+          imageDatName: getSafeImageDatName(item) || undefined,
+          createTime: Number(item.createTime || 0) || undefined,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          allowCacheIndex: true,
+          suppressEvents: true
         })
         if (resolved?.success && resolved.localPath) {
           const localPath = resolved.localPath
@@ -1007,7 +1143,7 @@ function ResourcesPage() {
       setActionMessage('图片解密完成')
       return undefined
     } catch (e) {
-      showAlert(`解密失败：${String(e)}`, '解密失败')
+      showAlert(`本地无数据：${String(e)}`, '未找到本地数据')
       return undefined
     } finally {
       setDecryptingKeys((prev) => {
@@ -1027,8 +1163,13 @@ function ResourcesPage() {
       try {
         const resolved = await window.electronAPI.image.resolveCache({
           sessionId: item.sessionId,
-          imageMd5: item.imageMd5 || undefined,
-          imageDatName: item.imageDatName || undefined
+          imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+          imageDatName: getSafeImageDatName(item) || undefined,
+          createTime: Number(item.createTime || 0) || undefined,
+          preferFilePath: true,
+          hardlinkOnly: true,
+          allowCacheIndex: true,
+          suppressEvents: true
         })
         if (resolved?.success && resolved.localPath) {
           localPath = resolved.localPath
@@ -1046,8 +1187,13 @@ function ResourcesPage() {
     try {
       const resolved = await window.electronAPI.image.resolveCache({
         sessionId: item.sessionId,
-        imageMd5: item.imageMd5 || undefined,
-        imageDatName: item.imageDatName || undefined
+        imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+        imageDatName: getSafeImageDatName(item) || undefined,
+        createTime: Number(item.createTime || 0) || undefined,
+        preferFilePath: true,
+        hardlinkOnly: true,
+        allowCacheIndex: true,
+        suppressEvents: true
       })
       if (resolved?.success && resolved.localPath) {
         localPath = resolved.localPath
@@ -1077,7 +1223,8 @@ function ResourcesPage() {
 
     setBatchBusy(true)
     let success = 0
-    let failed = 0
+    let notFound = 0
+    let decryptFailed = 0
     const previewPatch: Record<string, string> = {}
     const updatePatch: Record<string, boolean> = {}
     const taskId = registerBackgroundTask({
@@ -1105,32 +1252,71 @@ function ResourcesPage() {
         lastProgressBucket = bucket
         lastProgressUpdateAt = now
       }
+      const hardlinkMd5Set = new Set<string>()
       for (const item of imageItems) {
-        if (!item.imageMd5 && !item.imageDatName) {
-          failed += 1
-          completed += 1
-          updateTaskProgress()
+        if (!hasImageLocator(item)) continue
+        const imageMd5 = normalizeMediaToken(item.imageMd5)
+        if (imageMd5) {
+          hardlinkMd5Set.add(imageMd5)
           continue
         }
-        const result = await window.electronAPI.image.decrypt({
-          sessionId: item.sessionId,
-          imageMd5: item.imageMd5 || undefined,
-          imageDatName: item.imageDatName || undefined,
-          force: true
-        })
-        if (!result?.success) {
-          failed += 1
-        } else {
-          success += 1
-          if (result.localPath) {
-            const key = getItemKey(item)
-            previewPatch[key] = result.localPath
-            updatePatch[key] = isLikelyThumbnailPreview(result.localPath)
+        const imageDatName = getSafeImageDatName(item)
+        if (/^[a-f0-9]{32}$/i.test(imageDatName)) {
+          hardlinkMd5Set.add(imageDatName)
+        }
+      }
+      if (hardlinkMd5Set.size > 0) {
+        try {
+          await window.electronAPI.image.preloadHardlinkMd5s(Array.from(hardlinkMd5Set))
+        } catch {
+          // ignore preload failures and continue decrypt
+        }
+      }
+
+      const concurrency = Math.max(1, Math.min(BATCH_IMAGE_DECRYPT_CONCURRENCY, imageItems.length))
+      let cursor = 0
+      const worker = async () => {
+        while (true) {
+          const index = cursor
+          cursor += 1
+          if (index >= imageItems.length) return
+          const item = imageItems[index]
+          try {
+            if (!hasImageLocator(item)) {
+              notFound += 1
+              continue
+            }
+            const result = await window.electronAPI.image.decrypt({
+              sessionId: item.sessionId,
+              imageMd5: normalizeMediaToken(item.imageMd5) || undefined,
+              imageDatName: getSafeImageDatName(item) || undefined,
+              createTime: Number(item.createTime || 0) || undefined,
+              force: true,
+              preferFilePath: true,
+              hardlinkOnly: true,
+              allowCacheIndex: true,
+              suppressEvents: true
+            })
+            if (!result?.success) {
+              if (result?.failureKind === 'decrypt_failed') decryptFailed += 1
+              else notFound += 1
+            } else {
+              success += 1
+              if (result.localPath) {
+                const key = getItemKey(item)
+                previewPatch[key] = result.localPath
+                updatePatch[key] = isLikelyThumbnailPreview(result.localPath)
+              }
+            }
+          } catch {
+            notFound += 1
+          } finally {
+            completed += 1
+            updateTaskProgress()
           }
         }
-        completed += 1
-        updateTaskProgress()
       }
+      await Promise.all(Array.from({ length: concurrency }, () => worker()))
       updateTaskProgress(true)
 
       if (Object.keys(previewPatch).length > 0) {
@@ -1139,11 +1325,11 @@ function ResourcesPage() {
       if (Object.keys(updatePatch).length > 0) {
         setPreviewUpdateMap((prev) => ({ ...prev, ...updatePatch }))
       }
-      setActionMessage(`批量解密完成：成功 ${success}，失败 ${failed}`)
-      showAlert(`批量解密完成：成功 ${success}，失败 ${failed}`, '批量解密完成')
-      finishBackgroundTask(taskId, success > 0 || failed === 0 ? 'completed' : 'failed', {
-        detail: `资源页图片批量解密完成：成功 ${success}，失败 ${failed}`,
-        progressText: `成功 ${success} / 失败 ${failed}`
+      setActionMessage(`批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`)
+      showAlert(`批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`, '批量解密完成')
+      finishBackgroundTask(taskId, decryptFailed > 0 ? 'failed' : 'completed', {
+        detail: `资源页图片批量解密完成：成功 ${success}，未找到 ${notFound}，解密失败 ${decryptFailed}`,
+        progressText: `成功 ${success} / 未找到 ${notFound} / 解密失败 ${decryptFailed}`
       })
     } catch (e) {
       finishBackgroundTask(taskId, 'failed', {
@@ -1284,6 +1470,7 @@ function ResourcesPage() {
                   decrypting={decryptingKeys.has(itemKey)}
                   onToggleSelect={toggleSelect}
                   onDelete={deleteOne}
+                  onShowInfo={showMediaInfo}
                   onImagePreviewAction={onImagePreviewAction}
                   onUpdateImageQuality={updateImageQuality}
                   onOpenVideo={openVideo}
@@ -1301,7 +1488,20 @@ function ResourcesPage() {
         <div className="resource-dialog-mask">
           <div className="resource-dialog" role="dialog" aria-modal="true" aria-label={dialog.title}>
             <header className="dialog-header">{dialog.title}</header>
-            <div className="dialog-body">{dialog.message}</div>
+            <div className="dialog-body">
+              {dialog.mode === 'info' ? (
+                <div className="dialog-info-list">
+                  {(dialog.infoRows || []).map((row, idx) => (
+                    <div className="dialog-info-row" key={`${row.label}-${idx}`}>
+                      <span className="info-label">{row.label}</span>
+                      <span className="info-value" title={row.value}>{row.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                dialog.message
+              )}
+            </div>
             <footer className="dialog-actions">
               {dialog.mode === 'confirm' && (
                 <button type="button" className="dialog-btn ghost" onClick={closeDialog}>

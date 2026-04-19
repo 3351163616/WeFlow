@@ -478,8 +478,6 @@ export class KeyServiceMac {
       'return "WF_ERR::" & errNum & "::" & errMsg & "::" & (pr as text)',
       'end try'
     ]
-    onStatus?.('已准备就绪，现在登录微信或退出登录后重新登录微信', 0)
-
     let stdout = ''
     try {
       const result = await execFileAsync('/usr/bin/osascript', scriptLines.flatMap(line => ['-e', line]), {

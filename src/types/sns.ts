@@ -68,4 +68,5 @@ export interface SnsLinkCardData {
     title: string
     url: string
     thumb?: string
+    thumbKey?: string
 }

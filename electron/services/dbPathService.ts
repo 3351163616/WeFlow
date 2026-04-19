@@ -2,6 +2,7 @@ import { join, basename } from 'path'
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { createDecipheriv } from 'crypto'
+import { expandHomePath } from '../utils/pathUtils'
 
 export interface WxidInfo {
   wxid: string
@@ -139,13 +140,14 @@ export class DbPathService {
    * 查找账号目录（包含 db_storage 或图片目录）
    */
   findAccountDirs(rootPath: string): string[] {
+    const resolvedRootPath = expandHomePath(rootPath)
     const accounts: string[] = []
 
     try {
-      const entries = readdirSync(rootPath)
+      const entries = readdirSync(resolvedRootPath)
 
       for (const entry of entries) {
-        const entryPath = join(rootPath, entry)
+        const entryPath = join(resolvedRootPath, entry)
         let stat: ReturnType<typeof statSync>
         try {
           stat = statSync(entryPath)
@@ -216,13 +218,14 @@ export class DbPathService {
    * 扫描目录名候选（仅包含下划线的文件夹，排除 all_users）
    */
   scanWxidCandidates(rootPath: string): WxidInfo[] {
+    const resolvedRootPath = expandHomePath(rootPath)
     const wxids: WxidInfo[] = []
 
     try {
-      if (existsSync(rootPath)) {
-        const entries = readdirSync(rootPath)
+      if (existsSync(resolvedRootPath)) {
+        const entries = readdirSync(resolvedRootPath)
         for (const entry of entries) {
-          const entryPath = join(rootPath, entry)
+          const entryPath = join(resolvedRootPath, entry)
           let stat: ReturnType<typeof statSync>
           try { stat = statSync(entryPath) } catch { continue }
           if (!stat.isDirectory()) continue
@@ -235,9 +238,9 @@ export class DbPathService {
 
 
       if (wxids.length === 0) {
-        const rootName = basename(rootPath)
+        const rootName = basename(resolvedRootPath)
         if (rootName.includes('_') && rootName.toLowerCase() !== 'all_users') {
-          const rootStat = statSync(rootPath)
+          const rootStat = statSync(resolvedRootPath)
           wxids.push({ wxid: rootName, modifiedTime: rootStat.mtimeMs })
         }
       }
@@ -248,7 +251,7 @@ export class DbPathService {
       return a.wxid.localeCompare(b.wxid)
     });
 
-    const globalInfo = this.parseGlobalConfig(rootPath);
+    const globalInfo = this.parseGlobalConfig(resolvedRootPath);
     if (globalInfo) {
       for (const w of sorted) {
         if (w.wxid.startsWith(globalInfo.wxid) || sorted.length === 1) {
@@ -266,19 +269,20 @@ export class DbPathService {
    * 扫描 wxid 列表
    */
   scanWxids(rootPath: string): WxidInfo[] {
+    const resolvedRootPath = expandHomePath(rootPath)
     const wxids: WxidInfo[] = []
 
     try {
-      if (this.isAccountDir(rootPath)) {
-        const wxid = basename(rootPath)
-        const modifiedTime = this.getAccountModifiedTime(rootPath)
+      if (this.isAccountDir(resolvedRootPath)) {
+        const wxid = basename(resolvedRootPath)
+        const modifiedTime = this.getAccountModifiedTime(resolvedRootPath)
         return [{ wxid, modifiedTime }]
       }
 
-      const accounts = this.findAccountDirs(rootPath)
+      const accounts = this.findAccountDirs(resolvedRootPath)
 
       for (const account of accounts) {
-        const fullPath = join(rootPath, account)
+        const fullPath = join(resolvedRootPath, account)
         const modifiedTime = this.getAccountModifiedTime(fullPath)
         wxids.push({ wxid: account, modifiedTime })
       }
@@ -289,7 +293,7 @@ export class DbPathService {
       return a.wxid.localeCompare(b.wxid)
     });
 
-    const globalInfo = this.parseGlobalConfig(rootPath);
+    const globalInfo = this.parseGlobalConfig(resolvedRootPath);
     if (globalInfo) {
       for (const w of sorted) {
         if (w.wxid.startsWith(globalInfo.wxid) || sorted.length === 1) {

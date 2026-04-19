@@ -2,6 +2,7 @@ import { join, dirname, basename } from 'path'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import * as fzstd from 'fzstd'
+import { expandHomePath } from '../utils/pathUtils'
 
 //数据服务初始化错误信息，用于帮助用户诊断问题
 let lastDllInitError: string | null = null
@@ -481,7 +482,7 @@ export class WcdbCore {
 
   private resolveDbStoragePath(basePath: string, wxid: string): string | null {
     if (!basePath) return null
-    const normalized = basePath.replace(/[\\\\/]+$/, '')
+    const normalized = expandHomePath(basePath).replace(/[\\\\/]+$/, '')
     if (normalized.toLowerCase().endsWith('db_storage') && existsSync(normalized)) {
       return normalized
     }
@@ -1600,6 +1601,9 @@ export class WcdbCore {
    */
   close(): void {
     if (this.handle !== null || this.initialized) {
+      // 先停止监控与云控回调，避免 shutdown 后仍有 native 回调访问已释放资源。
+      try { this.stopMonitor() } catch {}
+      try { this.cloudStop() } catch {}
       try {
         // 不调用 closeAccount，直接 shutdown
         this.wcdbShutdown()
@@ -2007,6 +2011,14 @@ export class WcdbCore {
         }
         return ''
       }
+      const pickRaw = (row: Record<string, any>, keys: string[]): unknown => {
+        for (const key of keys) {
+          const value = row[key]
+          if (value === null || value === undefined) continue
+          return value
+        }
+        return undefined
+      }
       const extractXmlValue = (xml: string, tag: string): string => {
         if (!xml) return ''
         const regex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i')
@@ -2092,25 +2104,37 @@ export class WcdbCore {
         const md5Like = /([0-9a-fA-F]{16,64})/.exec(fileBase)
         return String(md5Like?.[1] || fileBase || '').trim().toLowerCase()
       }
-      const decodePackedToPrintable = (raw: string): string => {
-        const text = String(raw || '').trim()
-        if (!text) return ''
-        let buf: Buffer | null = null
-        if (/^[a-fA-F0-9]+$/.test(text) && text.length % 2 === 0) {
-          try {
-            buf = Buffer.from(text, 'hex')
-          } catch {
-            buf = null
+      const decodePackedInfoBuffer = (raw: unknown): Buffer | null => {
+        if (!raw) return null
+        if (Buffer.isBuffer(raw)) return raw
+        if (raw instanceof Uint8Array) return Buffer.from(raw)
+        if (Array.isArray(raw)) return Buffer.from(raw as any[])
+        if (typeof raw === 'string') {
+          const text = raw.trim()
+          if (!text) return null
+          const compactHex = text.replace(/\s+/g, '')
+          if (/^[a-fA-F0-9]+$/.test(compactHex) && compactHex.length % 2 === 0) {
+            try {
+              return Buffer.from(compactHex, 'hex')
+            } catch {
+              // ignore
+            }
           }
-        }
-        if (!buf) {
           try {
             const base64 = Buffer.from(text, 'base64')
-            if (base64.length > 0) buf = base64
+            if (base64.length > 0) return base64
           } catch {
-            buf = null
+            // ignore
           }
+          return null
         }
+        if (typeof raw === 'object' && raw !== null && Array.isArray((raw as any).data)) {
+          return Buffer.from((raw as any).data)
+        }
+        return null
+      }
+      const decodePackedToPrintable = (raw: unknown): string => {
+        const buf = decodePackedInfoBuffer(raw)
         if (!buf || buf.length === 0) return ''
         const printable: number[] = []
         for (const byte of buf) {
@@ -2124,6 +2148,46 @@ export class WcdbCore {
         if (!input) return ''
         const match = /([a-fA-F0-9]{32})/.exec(input)
         return String(match?.[1] || '').toLowerCase()
+      }
+      const normalizeVideoFileToken = (value: unknown): string => {
+        let text = String(value || '').trim().toLowerCase()
+        if (!text) return ''
+        text = text.replace(/^.*[\\/]/, '')
+        text = text.replace(/\.(?:mp4|mov|m4v|avi|mkv|flv|jpg|jpeg|png|gif|dat)$/i, '')
+        text = text.replace(/_thumb$/, '')
+        const direct = /^([a-f0-9]{16,64})(?:_raw)?$/i.exec(text)
+        if (direct) {
+          const suffix = /_raw$/i.test(text) ? '_raw' : ''
+          return `${direct[1].toLowerCase()}${suffix}`
+        }
+        const preferred32 = /([a-f0-9]{32})(?![a-f0-9])/i.exec(text)
+        if (preferred32?.[1]) return preferred32[1].toLowerCase()
+        const fallback = /([a-f0-9]{16,64})(?![a-f0-9])/i.exec(text)
+        return String(fallback?.[1] || '').toLowerCase()
+      }
+      const extractVideoFileNameFromPackedRaw = (raw: unknown): string => {
+        const buf = decodePackedInfoBuffer(raw)
+        if (!buf || buf.length === 0) return ''
+        const candidates: string[] = []
+        let current = ''
+        for (const byte of buf) {
+          const isHex =
+            (byte >= 0x30 && byte <= 0x39) ||
+            (byte >= 0x41 && byte <= 0x46) ||
+            (byte >= 0x61 && byte <= 0x66)
+          if (isHex) {
+            current += String.fromCharCode(byte)
+            continue
+          }
+          if (current.length >= 16) candidates.push(current)
+          current = ''
+        }
+        if (current.length >= 16) candidates.push(current)
+        if (candidates.length === 0) return ''
+        const exact32 = candidates.find((item) => item.length === 32)
+        if (exact32) return exact32.toLowerCase()
+        const fallback = candidates.find((item) => item.length >= 16 && item.length <= 64)
+        return String(fallback || '').toLowerCase()
       }
       const extractImageDatName = (row: Record<string, any>, content: string): string => {
         const direct = pickString(row, [
@@ -2143,7 +2207,7 @@ export class WcdbCore {
         const normalizedXml = normalizeDatBase(xmlCandidate)
         if (normalizedXml) return normalizedXml
 
-        const packedRaw = pickString(row, [
+        const packedRaw = pickRaw(row, [
           'packed_info_data',
           'packedInfoData',
           'packed_info_blob',
@@ -2168,7 +2232,7 @@ export class WcdbCore {
         return ''
       }
       const extractPackedPayload = (row: Record<string, any>): string => {
-        const packedRaw = pickString(row, [
+        const packedRaw = pickRaw(row, [
           'packed_info_data',
           'packedInfoData',
           'packed_info_blob',
@@ -2323,6 +2387,20 @@ export class WcdbCore {
         const packedPayload = extractPackedPayload(row)
         const imageMd5ByColumn = pickString(row, ['image_md5', 'imageMd5'])
         const videoMd5ByColumn = pickString(row, ['video_md5', 'videoMd5', 'raw_md5', 'rawMd5'])
+        const packedRaw = pickRaw(row, [
+          'packed_info_data',
+          'packedInfoData',
+          'packed_info_blob',
+          'packedInfoBlob',
+          'packed_info',
+          'packedInfo',
+          'BytesExtra',
+          'bytes_extra',
+          'WCDB_CT_packed_info',
+          'reserved0',
+          'Reserved0',
+          'WCDB_CT_Reserved0'
+        ])
 
         let content = ''
         let imageMd5: string | undefined
@@ -2338,10 +2416,17 @@ export class WcdbCore {
             if (!imageDatName) imageDatName = extractImageDatName(row, content) || undefined
           }
         } else if (localType === 43) {
-          videoMd5 = videoMd5ByColumn || extractHexMd5(packedPayload) || undefined
+          videoMd5 =
+            extractVideoFileNameFromPackedRaw(packedRaw) ||
+            normalizeVideoFileToken(videoMd5ByColumn) ||
+            extractHexMd5(packedPayload) ||
+            undefined
           if (!videoMd5) {
             content = decodeContentIfNeeded()
-            videoMd5 = extractVideoMd5(content) || extractHexMd5(packedPayload) || undefined
+            videoMd5 =
+              normalizeVideoFileToken(extractVideoMd5(content)) ||
+              extractHexMd5(packedPayload) ||
+              undefined
           } else if (useRawMessageContent) {
             // 占位态标题只依赖简单 XML，已带 md5 时不做额外解压
             content = rawMessageContent

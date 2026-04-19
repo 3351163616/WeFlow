@@ -8,6 +8,7 @@ export type ExportAutomationSchedule =
       type: 'interval'
       intervalDays: number
       intervalHours: number
+      firstTriggerAt?: number
     }
 
 export interface ExportAutomationCondition {

@@ -9,10 +9,12 @@ type BackgroundTaskListener = (tasks: BackgroundTaskRecord[]) => void
 
 const tasks = new Map<string, BackgroundTaskRecord>()
 const cancelHandlers = new Map<string, () => void | Promise<void>>()
+const pauseHandlers = new Map<string, () => void | Promise<void>>()
+const resumeHandlers = new Map<string, () => void | Promise<void>>()
 const listeners = new Set<BackgroundTaskListener>()
 let taskSequence = 0
 
-const ACTIVE_STATUSES = new Set<BackgroundTaskStatus>(['running', 'cancel_requested'])
+const ACTIVE_STATUSES = new Set<BackgroundTaskStatus>(['running', 'pause_requested', 'paused', 'cancel_requested'])
 const MAX_SETTLED_TASKS = 24
 
 const buildTaskId = (): string => {
@@ -34,6 +36,9 @@ const pruneSettledTasks = () => {
 
   for (const staleTask of settledTasks.slice(MAX_SETTLED_TASKS)) {
     tasks.delete(staleTask.id)
+    cancelHandlers.delete(staleTask.id)
+    pauseHandlers.delete(staleTask.id)
+    resumeHandlers.delete(staleTask.id)
   }
 }
 
@@ -64,13 +69,21 @@ export const registerBackgroundTask = (input: BackgroundTaskInput): string => {
     detail: input.detail,
     progressText: input.progressText,
     cancelable: input.cancelable !== false,
+    resumable: input.resumable === true,
     cancelRequested: false,
+    pauseRequested: false,
     status: 'running',
     startedAt: now,
     updatedAt: now
   })
   if (input.onCancel) {
     cancelHandlers.set(taskId, input.onCancel)
+  }
+  if (input.onPause) {
+    pauseHandlers.set(taskId, input.onPause)
+  }
+  if (input.onResume) {
+    resumeHandlers.set(taskId, input.onResume)
   }
   pruneSettledTasks()
   notifyListeners()
@@ -87,6 +100,9 @@ export const updateBackgroundTask = (taskId: string, patch: BackgroundTaskUpdate
     ...patch,
     status: nextStatus,
     updatedAt: nextUpdatedAt,
+    pauseRequested: nextStatus === 'paused' || nextStatus === 'pause_requested'
+      ? true
+      : (nextStatus === 'running' ? false : existing.pauseRequested),
     finishedAt: ACTIVE_STATUSES.has(nextStatus) ? undefined : (existing.finishedAt || nextUpdatedAt)
   })
   pruneSettledTasks()
@@ -107,9 +123,12 @@ export const finishBackgroundTask = (
     status,
     updatedAt: now,
     finishedAt: now,
-    cancelRequested: status === 'canceled' ? true : existing.cancelRequested
+    cancelRequested: status === 'canceled' ? true : existing.cancelRequested,
+    pauseRequested: false
   })
   cancelHandlers.delete(taskId)
+  pauseHandlers.delete(taskId)
+  resumeHandlers.delete(taskId)
   pruneSettledTasks()
   notifyListeners()
 }
@@ -121,12 +140,53 @@ export const requestCancelBackgroundTask = (taskId: string): boolean => {
     ...existing,
     status: 'cancel_requested',
     cancelRequested: true,
+    pauseRequested: false,
     detail: existing.detail || '停止请求已发出，当前查询完成后会结束后续加载',
     updatedAt: Date.now()
   })
   const cancelHandler = cancelHandlers.get(taskId)
   if (cancelHandler) {
     void Promise.resolve(cancelHandler()).catch(() => {})
+  }
+  notifyListeners()
+  return true
+}
+
+export const requestPauseBackgroundTask = (taskId: string): boolean => {
+  const existing = tasks.get(taskId)
+  if (!existing || !existing.resumable) return false
+  if (existing.status !== 'running' && existing.status !== 'pause_requested') return false
+  tasks.set(taskId, {
+    ...existing,
+    status: 'pause_requested',
+    pauseRequested: true,
+    detail: existing.detail || '中断请求已发出，当前处理完成后会暂停',
+    updatedAt: Date.now()
+  })
+  const pauseHandler = pauseHandlers.get(taskId)
+  if (pauseHandler) {
+    void Promise.resolve(pauseHandler()).catch(() => {})
+  }
+  notifyListeners()
+  return true
+}
+
+export const requestResumeBackgroundTask = (taskId: string): boolean => {
+  const existing = tasks.get(taskId)
+  if (!existing || !existing.resumable) return false
+  if (existing.status !== 'paused' && existing.status !== 'pause_requested') return false
+  tasks.set(taskId, {
+    ...existing,
+    status: 'running',
+    cancelRequested: false,
+    pauseRequested: false,
+    detail: existing.detail || '任务已继续',
+    updatedAt: Date.now(),
+    finishedAt: undefined
+  })
+  const resumeHandler = resumeHandlers.get(taskId)
+  if (resumeHandler) {
+    void Promise.resolve(resumeHandler()).catch(() => {})
   }
   notifyListeners()
   return true
@@ -146,4 +206,9 @@ export const requestCancelBackgroundTasks = (predicate: (task: BackgroundTaskRec
 export const isBackgroundTaskCancelRequested = (taskId: string): boolean => {
   const task = tasks.get(taskId)
   return Boolean(task?.cancelRequested)
+}
+
+export const isBackgroundTaskPauseRequested = (taskId: string): boolean => {
+  const task = tasks.get(taskId)
+  return Boolean(task?.pauseRequested)
 }

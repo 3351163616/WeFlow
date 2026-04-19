@@ -1,8 +1,6 @@
 ﻿import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync, appendFileSync, mkdirSync, unlinkSync } from 'fs'
-import { spawn } from 'child_process'
+import { existsSync, readdirSync, statSync, readFileSync, appendFileSync, mkdirSync } from 'fs'
 import { pathToFileURL } from 'url'
-import crypto from 'crypto'
 import { app } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
@@ -27,48 +25,15 @@ interface VideoIndexEntry {
 
 type PosterFormat = 'dataUrl' | 'fileUrl'
 
-function getStaticFfmpegPath(): string | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const ffmpegStatic = require('ffmpeg-static')
-    if (typeof ffmpegStatic === 'string') {
-      let fixedPath = ffmpegStatic
-      if (fixedPath.includes('app.asar') && !fixedPath.includes('app.asar.unpacked')) {
-        fixedPath = fixedPath.replace('app.asar', 'app.asar.unpacked')
-      }
-      if (existsSync(fixedPath)) return fixedPath
-    }
-  } catch {
-    // ignore
-  }
-
-  const ffmpegName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-  const devPath = join(process.cwd(), 'node_modules', 'ffmpeg-static', ffmpegName)
-  if (existsSync(devPath)) return devPath
-
-  if (app.isPackaged) {
-    const packedPath = join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', ffmpegName)
-    if (existsSync(packedPath)) return packedPath
-  }
-
-  return null
-}
-
 class VideoService {
   private configService: ConfigService
   private hardlinkResolveCache = new Map<string, TimedCacheEntry<string | null>>()
   private videoInfoCache = new Map<string, TimedCacheEntry<VideoInfo>>()
   private videoDirIndexCache = new Map<string, TimedCacheEntry<Map<string, VideoIndexEntry>>>()
   private pendingVideoInfo = new Map<string, Promise<VideoInfo>>()
-  private pendingPosterExtract = new Map<string, Promise<string | null>>()
-  private extractedPosterCache = new Map<string, TimedCacheEntry<string | null>>()
-  private posterExtractRunning = 0
-  private posterExtractQueue: Array<() => void> = []
   private readonly hardlinkCacheTtlMs = 10 * 60 * 1000
   private readonly videoInfoCacheTtlMs = 2 * 60 * 1000
   private readonly videoIndexCacheTtlMs = 90 * 1000
-  private readonly extractedPosterCacheTtlMs = 15 * 60 * 1000
-  private readonly maxPosterExtractConcurrency = 1
   private readonly maxCacheEntries = 2000
   private readonly maxIndexEntries = 6
 
@@ -287,11 +252,9 @@ class VideoService {
   }
 
   async preloadVideoHardlinkMd5s(md5List: string[]): Promise<void> {
-    const dbPath = this.getDbPath()
-    const wxid = this.getMyWxid()
-    const cleanedWxid = this.cleanWxid(wxid)
-    if (!dbPath || !wxid) return
-    await this.resolveVideoHardlinks(md5List, dbPath, wxid, cleanedWxid)
+    // 视频链路已改为直接使用 packed_info_data 提取出的文件名索引本地目录。
+    // 该预热接口保留仅为兼容旧调用方，不再查询 hardlink.db。
+    void md5List
   }
 
   private fileToPosterUrl(filePath: string | undefined, mimeType: string, posterFormat: PosterFormat): string | undefined {
@@ -429,6 +392,23 @@ class VideoService {
     return null
   }
 
+  private normalizeVideoLookupKey(value: string): string {
+    let text = String(value || '').trim().toLowerCase()
+    if (!text) return ''
+    text = text.replace(/^.*[\\/]/, '')
+    text = text.replace(/\.(?:mp4|mov|m4v|avi|mkv|flv|jpg|jpeg|png|gif|dat)$/i, '')
+    text = text.replace(/_thumb$/, '')
+    const direct = /^([a-f0-9]{16,64})(?:_raw)?$/i.exec(text)
+    if (direct) {
+      const suffix = /_raw$/i.test(text) ? '_raw' : ''
+      return `${direct[1].toLowerCase()}${suffix}`
+    }
+    const preferred32 = /([a-f0-9]{32})(?![a-f0-9])/i.exec(text)
+    if (preferred32?.[1]) return preferred32[1].toLowerCase()
+    const fallback = /([a-f0-9]{16,64})(?![a-f0-9])/i.exec(text)
+    return String(fallback?.[1] || '').toLowerCase()
+  }
+
   private fallbackScanVideo(
     videoBaseDir: string,
     realVideoMd5: string,
@@ -473,154 +453,10 @@ class VideoService {
     return null
   }
 
-  private getFfmpegPath(): string {
-    const staticPath = getStaticFfmpegPath()
-    if (staticPath) return staticPath
-    return 'ffmpeg'
-  }
-
-  private async withPosterExtractSlot<T>(run: () => Promise<T>): Promise<T> {
-    if (this.posterExtractRunning >= this.maxPosterExtractConcurrency) {
-      await new Promise<void>((resolve) => {
-        this.posterExtractQueue.push(resolve)
-      })
-    }
-    this.posterExtractRunning += 1
-    try {
-      return await run()
-    } finally {
-      this.posterExtractRunning = Math.max(0, this.posterExtractRunning - 1)
-      const next = this.posterExtractQueue.shift()
-      if (next) next()
-    }
-  }
-
-  private async extractFirstFramePoster(videoPath: string, posterFormat: PosterFormat): Promise<string | null> {
-    const normalizedPath = String(videoPath || '').trim()
-    if (!normalizedPath || !existsSync(normalizedPath)) return null
-
-    const cacheKey = `${normalizedPath}|format=${posterFormat}`
-    const cached = this.readTimedCache(this.extractedPosterCache, cacheKey)
-    if (cached !== undefined) return cached
-
-    const pending = this.pendingPosterExtract.get(cacheKey)
-    if (pending) return pending
-
-    const task = this.withPosterExtractSlot(() => new Promise<string | null>((resolve) => {
-      const tmpDir = join(app.getPath('temp'), 'weflow_video_frames')
-      try {
-        if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true })
-      } catch {
-        resolve(null)
-        return
-      }
-
-      const stableHash = crypto.createHash('sha1').update(normalizedPath).digest('hex').slice(0, 24)
-      const outputPath = join(tmpDir, `frame_${stableHash}.jpg`)
-      if (posterFormat === 'fileUrl' && existsSync(outputPath)) {
-        resolve(pathToFileURL(outputPath).toString())
-        return
-      }
-
-      const ffmpegPath = this.getFfmpegPath()
-      const args = [
-        '-hide_banner', '-loglevel', 'error', '-y',
-        '-ss', '0',
-        '-i', normalizedPath,
-        '-frames:v', '1',
-        '-q:v', '3',
-        outputPath
-      ]
-
-      const errChunks: Buffer[] = []
-      let done = false
-      const finish = (value: string | null) => {
-        if (done) return
-        done = true
-        if (posterFormat === 'dataUrl') {
-          try {
-            if (existsSync(outputPath)) unlinkSync(outputPath)
-          } catch {
-            // ignore
-          }
-        }
-        resolve(value)
-      }
-
-      const proc = spawn(ffmpegPath, args, {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        windowsHide: true
-      })
-
-      const timer = setTimeout(() => {
-        try { proc.kill('SIGKILL') } catch { /* ignore */ }
-        finish(null)
-      }, 12000)
-
-      proc.stderr.on('data', (chunk: Buffer) => errChunks.push(chunk))
-
-      proc.on('error', () => {
-        clearTimeout(timer)
-        finish(null)
-      })
-
-      proc.on('close', (code: number) => {
-        clearTimeout(timer)
-        if (code !== 0 || !existsSync(outputPath)) {
-          if (errChunks.length > 0) {
-            this.log('extractFirstFrameDataUrl failed', {
-              videoPath: normalizedPath,
-              error: Buffer.concat(errChunks).toString().slice(0, 240)
-            })
-          }
-          finish(null)
-          return
-        }
-        try {
-          const jpgBuf = readFileSync(outputPath)
-          if (!jpgBuf.length) {
-            finish(null)
-            return
-          }
-          if (posterFormat === 'fileUrl') {
-            finish(pathToFileURL(outputPath).toString())
-            return
-          }
-          finish(`data:image/jpeg;base64,${jpgBuf.toString('base64')}`)
-        } catch {
-          finish(null)
-        }
-      })
-    }))
-
-    this.pendingPosterExtract.set(cacheKey, task)
-    try {
-      const result = await task
-      this.writeTimedCache(
-        this.extractedPosterCache,
-        cacheKey,
-        result,
-        this.extractedPosterCacheTtlMs,
-        this.maxCacheEntries
-      )
-      return result
-    } finally {
-      this.pendingPosterExtract.delete(cacheKey)
-    }
-  }
-
   private async ensurePoster(info: VideoInfo, includePoster: boolean, posterFormat: PosterFormat): Promise<VideoInfo> {
+    void posterFormat
     if (!includePoster) return info
-    if (!info.exists || !info.videoUrl) return info
-    if (info.coverUrl || info.thumbUrl) return info
-
-    const extracted = await this.extractFirstFramePoster(info.videoUrl, posterFormat)
-    if (!extracted) return info
-    return {
-      ...info,
-      coverUrl: extracted,
-      thumbUrl: extracted
-    }
+    return info
   }
 
   /**
@@ -652,7 +488,7 @@ class VideoService {
     if (pending) return pending
 
     const task = (async (): Promise<VideoInfo> => {
-      const realVideoMd5 = await this.queryVideoFileName(normalizedMd5) || normalizedMd5
+      const realVideoMd5 = this.normalizeVideoLookupKey(normalizedMd5) || normalizedMd5
       const videoBaseDir = this.resolveVideoBaseDir(dbPath, wxid)
 
       if (!existsSync(videoBaseDir)) {
@@ -678,7 +514,7 @@ class VideoService {
 
       const miss = { exists: false }
       this.writeTimedCache(this.videoInfoCache, cacheKey, miss, this.videoInfoCacheTtlMs, this.maxCacheEntries)
-      this.log('getVideoInfo: 未找到视频', { inputMd5: normalizedMd5, resolvedMd5: realVideoMd5 })
+      this.log('getVideoInfo: 未找到视频', { lookupKey: normalizedMd5, normalizedKey: realVideoMd5 })
       return miss
     })()
 

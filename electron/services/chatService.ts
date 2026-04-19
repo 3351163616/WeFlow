@@ -486,7 +486,7 @@ class ChatService {
     return Number.isFinite(parsed) ? parsed : null
   }
 
-  private toCodeOnlyMessage(rawMessage?: string, fallbackCode = -3999): string {
+  private toCodeOnlyMessage(rawMessage?: string | null, fallbackCode = -3999): string {
     const code = this.extractErrorCode(rawMessage) ?? fallbackCode
     return `错误码: ${code}`
   }
@@ -4336,9 +4336,9 @@ class ChatService {
         encrypVer = imageInfo.encrypVer
         cdnThumbUrl = imageInfo.cdnThumbUrl
         imageDatName = this.parseImageDatNameFromRow(row)
-      } else if (localType === 43 && content) {
-        // 视频消息
-        videoMd5 = this.parseVideoMd5(content)
+      } else if (localType === 43) {
+        // 视频消息：优先从 packed_info_data 提取真实文件名（32位十六进制），再回退 XML
+        videoMd5 = this.parseVideoFileNameFromRow(row, content)
       } else if (localType === 34 && content) {
         voiceDurationSeconds = this.parseVoiceDurationSeconds(content)
       } else if (localType === 42 && content) {
@@ -4876,7 +4876,20 @@ class ChatService {
   }
 
   private parseImageDatNameFromRow(row: Record<string, any>): string | undefined {
-    const packed = row.packed_info_data
+    const packed = this.getRowField(row, [
+      'packed_info_data',
+      'packedInfoData',
+      'packed_info_blob',
+      'packedInfoBlob',
+      'packed_info',
+      'packedInfo',
+      'BytesExtra',
+      'bytes_extra',
+      'WCDB_CT_packed_info',
+      'reserved0',
+      'Reserved0',
+      'WCDB_CT_Reserved0'
+    ])
     const buffer = this.decodePackedInfo(packed)
     if (!buffer || buffer.length === 0) return undefined
     const printable: number[] = []
@@ -4894,6 +4907,81 @@ class ChatService {
     return hexMatch?.[1]?.toLowerCase()
   }
 
+  private parseVideoFileNameFromRow(row: Record<string, any>, content?: string): string | undefined {
+    const packed = this.getRowField(row, [
+      'packed_info_data',
+      'packedInfoData',
+      'packed_info_blob',
+      'packedInfoBlob',
+      'packed_info',
+      'packedInfo',
+      'BytesExtra',
+      'bytes_extra',
+      'WCDB_CT_packed_info',
+      'reserved0',
+      'Reserved0',
+      'WCDB_CT_Reserved0'
+    ])
+    const packedToken = this.extractVideoTokenFromPackedRaw(packed)
+    if (packedToken) return packedToken
+
+    const byColumn = this.normalizeVideoFileToken(this.getRowField(row, [
+      'video_md5',
+      'videoMd5',
+      'raw_md5',
+      'rawMd5',
+      'video_file_name',
+      'videoFileName'
+    ]))
+    if (byColumn) return byColumn
+
+    return this.normalizeVideoFileToken(this.parseVideoMd5(content || ''))
+  }
+
+  private normalizeVideoFileToken(value: unknown): string | undefined {
+    let text = String(value || '').trim().toLowerCase()
+    if (!text) return undefined
+    text = text.replace(/^.*[\\/]/, '')
+    text = text.replace(/\.(?:mp4|mov|m4v|avi|mkv|flv|jpg|jpeg|png|gif|dat)$/i, '')
+    text = text.replace(/_thumb$/, '')
+    const directMatch = /^([a-f0-9]{16,64})(?:_raw)?$/i.exec(text)
+    if (directMatch) {
+      const suffix = /_raw$/i.test(text) ? '_raw' : ''
+      return `${directMatch[1].toLowerCase()}${suffix}`
+    }
+    const preferred32 = /([a-f0-9]{32})(?![a-f0-9])/i.exec(text)
+    if (preferred32?.[1]) return preferred32[1].toLowerCase()
+    const generic = /([a-f0-9]{16,64})(?![a-f0-9])/i.exec(text)
+    return generic?.[1]?.toLowerCase()
+  }
+
+  private extractVideoTokenFromPackedRaw(raw: unknown): string | undefined {
+    const buffer = this.decodePackedInfo(raw)
+    if (!buffer || buffer.length === 0) return undefined
+    const candidates: string[] = []
+    let current = ''
+    for (const byte of buffer) {
+      const isHex =
+        (byte >= 0x30 && byte <= 0x39) ||
+        (byte >= 0x41 && byte <= 0x46) ||
+        (byte >= 0x61 && byte <= 0x66)
+      if (isHex) {
+        current += String.fromCharCode(byte)
+        continue
+      }
+      if (current.length >= 16) candidates.push(current)
+      current = ''
+    }
+    if (current.length >= 16) candidates.push(current)
+    if (candidates.length === 0) return undefined
+
+    const exact32 = candidates.find((item) => item.length === 32)
+    if (exact32) return exact32.toLowerCase()
+
+    const fallback = candidates.find((item) => item.length >= 16 && item.length <= 64)
+    return fallback?.toLowerCase()
+  }
+
   private decodePackedInfo(raw: any): Buffer | null {
     if (!raw) return null
     if (Buffer.isBuffer(raw)) return raw
@@ -4901,9 +4989,10 @@ class ChatService {
     if (Array.isArray(raw)) return Buffer.from(raw)
     if (typeof raw === 'string') {
       const trimmed = raw.trim()
-      if (/^[a-fA-F0-9]+$/.test(trimmed) && trimmed.length % 2 === 0) {
+      const compactHex = trimmed.replace(/\s+/g, '')
+      if (/^[a-fA-F0-9]+$/.test(compactHex) && compactHex.length % 2 === 0) {
         try {
-          return Buffer.from(trimmed, 'hex')
+          return Buffer.from(compactHex, 'hex')
         } catch { }
       }
       try {
@@ -7105,13 +7194,23 @@ class ChatService {
         return { success: false, error: '未找到消息' }
       }
       const msg = msgResult.message
+      const rawImageInfo = msg.rawContent ? this.parseImageInfo(msg.rawContent) : {}
+      const imageMd5 = msg.imageMd5 || rawImageInfo.md5
+      const imageDatName = msg.imageDatName
 
-      // 2. 使用 imageDecryptService 解密图片
+      if (!imageMd5 && !imageDatName) {
+        return { success: false, error: '图片缺少 md5/datName，无法定位原文件' }
+      }
+
+      // 2. 使用 imageDecryptService 解密图片（仅使用真实图片标识）
       const result = await this.imageDecryptService.decryptImage({
         sessionId,
-        imageMd5: msg.imageMd5,
-        imageDatName: msg.imageDatName || String(msg.localId),
-        force: false
+        imageMd5,
+        imageDatName,
+        createTime: msg.createTime,
+        force: false,
+        preferFilePath: true,
+        hardlinkOnly: true
       })
 
       if (!result.success || !result.localPath) {
@@ -8358,7 +8457,6 @@ class ChatService {
         if (normalized.length === 0) return []
 
         // 规避 native options_json 可能存在的固定缓冲上限：按 payload 字节安全分块。
-        // 这不是降级或裁剪范围，而是完整遍历所有群并做结果合并。
         const maxBytesRaw = Number(process.env.WEFLOW_MY_FOOTPRINT_GROUP_OPTIONS_MAX_BYTES || 900)
         const maxBytes = Number.isFinite(maxBytesRaw) && maxBytesRaw >= 512
           ? Math.floor(maxBytesRaw)
@@ -9325,7 +9423,7 @@ class ChatService {
       latest_ts: this.toSafeInt(item?.latest_ts, 0),
       anchor_local_id: this.toSafeInt(item?.anchor_local_id, 0),
       anchor_create_time: this.toSafeInt(item?.anchor_create_time, 0)
-    })).filter((item) => item.session_id)
+    })).filter((item: MyFootprintPrivateSession) => item.session_id)
 
     const private_segments: MyFootprintPrivateSegment[] = privateSegmentsRaw.map((item: any) => ({
       session_id: String(item?.session_id || '').trim(),
@@ -9344,7 +9442,7 @@ class ChatService {
       anchor_create_time: this.toSafeInt(item?.anchor_create_time, 0),
       displayName: String(item?.displayName || '').trim() || undefined,
       avatarUrl: String(item?.avatarUrl || '').trim() || undefined
-    })).filter((item) => item.session_id && item.start_ts > 0)
+    })).filter((item: MyFootprintPrivateSegment) => item.session_id && item.start_ts > 0)
 
     const mentions: MyFootprintMentionItem[] = mentionsRaw.map((item: any) => ({
       session_id: String(item?.session_id || '').trim(),
@@ -9353,13 +9451,13 @@ class ChatService {
       sender_username: String(item?.sender_username || '').trim(),
       message_content: String(item?.message_content || ''),
       source: String(item?.source || '')
-    })).filter((item) => item.session_id)
+    })).filter((item: MyFootprintMentionItem) => item.session_id)
 
     const mention_groups: MyFootprintMentionGroup[] = mentionGroupsRaw.map((item: any) => ({
       session_id: String(item?.session_id || '').trim(),
       count: this.toSafeInt(item?.count, 0),
       latest_ts: this.toSafeInt(item?.latest_ts, 0)
-    })).filter((item) => item.session_id)
+    })).filter((item: MyFootprintMentionGroup) => item.session_id)
 
     const diagnostics: MyFootprintDiagnostics = {
       truncated: Boolean(diagnosticsRaw.truncated),
@@ -10481,6 +10579,8 @@ class ChatService {
       const imgInfo = this.parseImageInfo(rawContent)
       Object.assign(msg, imgInfo)
       msg.imageDatName = this.parseImageDatNameFromRow(row)
+    } else if (msg.localType === 43) { // Video
+      msg.videoMd5 = this.parseVideoFileNameFromRow(row, rawContent)
     } else if (msg.localType === 47) { // Emoji
       const emojiInfo = this.parseEmojiInfo(rawContent)
       msg.emojiCdnUrl = emojiInfo.cdnUrl

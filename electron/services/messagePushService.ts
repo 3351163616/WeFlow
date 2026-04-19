@@ -2,6 +2,10 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
+import { promises as fs } from 'fs'
+import path from 'path'
+import { createHash } from 'crypto'
+import { pathToFileURL } from 'url'
 
 interface SessionBaseline {
   lastTimestamp: number
@@ -33,6 +37,8 @@ class MessagePushService {
   private readonly sessionBaseline = new Map<string, SessionBaseline>()
   private readonly recentMessageKeys = new Map<string, number>()
   private readonly groupNicknameCache = new Map<string, { nicknames: Record<string, string>; updatedAt: number }>()
+  private readonly pushAvatarCacheDir: string
+  private readonly pushAvatarDataCache = new Map<string, string>()
   private readonly debounceMs = 350
   private readonly recentMessageTtlMs = 10 * 60 * 1000
   private readonly groupNicknameCacheTtlMs = 5 * 60 * 1000
@@ -45,12 +51,20 @@ class MessagePushService {
 
   constructor() {
     this.configService = ConfigService.getInstance()
+    this.pushAvatarCacheDir = path.join(this.configService.getCacheBasePath(), 'push-avatar-files')
   }
 
   start(): void {
     if (this.started) return
     this.started = true
     void this.refreshConfiguration('startup')
+  }
+
+  stop(): void {
+    this.started = false
+    this.processing = false
+    this.rerunRequested = false
+    this.resetRuntimeState()
   }
 
   handleDbMonitorChange(type: string, json: string): void {
@@ -303,12 +317,13 @@ class MessagePushService {
       const groupInfo = await chatService.getContactAvatar(sessionId)
       const groupName = session.displayName || groupInfo?.displayName || sessionId
       const sourceName = await this.resolveGroupSourceName(sessionId, message, session)
+      const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || groupInfo?.avatarUrl)
       return {
         event: 'message.new',
         sessionId,
         sessionType,
         messageKey,
-        avatarUrl: session.avatarUrl || groupInfo?.avatarUrl,
+        avatarUrl,
         groupName,
         sourceName,
         content
@@ -316,15 +331,61 @@ class MessagePushService {
     }
 
     const contactInfo = await chatService.getContactAvatar(sessionId)
+    const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || contactInfo?.avatarUrl)
     return {
       event: 'message.new',
       sessionId,
       sessionType,
       messageKey,
-      avatarUrl: session.avatarUrl || contactInfo?.avatarUrl,
+      avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       content
     }
+  }
+
+  private async normalizePushAvatarUrl(avatarUrl?: string): Promise<string | undefined> {
+    const normalized = String(avatarUrl || '').trim()
+    if (!normalized) return undefined
+    if (!normalized.startsWith('data:image/')) {
+      return normalized
+    }
+
+    const cached = this.pushAvatarDataCache.get(normalized)
+    if (cached) return cached
+
+    const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/i.exec(normalized)
+    if (!match) return undefined
+
+    try {
+      const mimeType = match[1].toLowerCase()
+      const base64Data = match[2]
+      const imageBuffer = Buffer.from(base64Data, 'base64')
+      if (!imageBuffer.length) return undefined
+
+      const ext = this.getImageExtFromMime(mimeType)
+      const hash = createHash('sha1').update(normalized).digest('hex')
+      const filePath = path.join(this.pushAvatarCacheDir, `avatar_${hash}.${ext}`)
+
+      await fs.mkdir(this.pushAvatarCacheDir, { recursive: true })
+      try {
+        await fs.access(filePath)
+      } catch {
+        await fs.writeFile(filePath, imageBuffer)
+      }
+
+      const fileUrl = pathToFileURL(filePath).toString()
+      this.pushAvatarDataCache.set(normalized, fileUrl)
+      return fileUrl
+    } catch {
+      return undefined
+    }
+  }
+
+  private getImageExtFromMime(mimeType: string): string {
+    if (mimeType === 'image/png') return 'png'
+    if (mimeType === 'image/gif') return 'gif'
+    if (mimeType === 'image/webp') return 'webp'
+    return 'jpg'
   }
 
   private getSessionType(sessionId: string, session: ChatSession): MessagePushPayload['sessionType'] {

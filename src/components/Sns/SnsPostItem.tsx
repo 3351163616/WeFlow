@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react'
+import React, { useState, useMemo, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Heart, ChevronRight, ImageIcon, Code, Trash2, MapPin } from 'lucide-react'
 import { SnsPost, SnsLinkCardData, SnsLocation } from '../../types/sns'
@@ -8,6 +8,7 @@ import { getEmojiPath } from 'wechat-emojis'
 
 // Helper functions (extracted from SnsPage.tsx but simplified/reused)
 const LINK_XML_URL_TAGS = ['url', 'shorturl', 'weburl', 'webpageurl', 'jumpurl']
+const LINK_XML_DIRECT_URL_TAGS = ['contentUrl', ...LINK_XML_URL_TAGS]
 const LINK_XML_TITLE_TAGS = ['title', 'linktitle', 'webtitle']
 const MEDIA_HOST_HINTS = ['mmsns.qpic.cn', 'vweixinthumb', 'snstimeline', 'snsvideodownload']
 
@@ -29,6 +30,13 @@ const decodeHtmlEntities = (text: string): string => {
         .trim()
 }
 
+const normalizeRawXmlForParsing = (xml: string): string => {
+    if (!xml) return ''
+    return decodeHtmlEntities(xml)
+        .replace(/\\+"/g, '"')
+        .replace(/\\+'/g, "'")
+}
+
 const normalizeUrlCandidate = (raw: string): string | null => {
     const value = decodeHtmlEntities(raw).replace(/[)\],.;]+$/, '').trim()
     if (!value) return null
@@ -43,12 +51,13 @@ const simplifyUrlForCompare = (value: string): string => {
 }
 
 const getXmlTagValues = (xml: string, tags: string[]): string[] => {
-    if (!xml) return []
+    const normalizedXml = normalizeRawXmlForParsing(xml)
+    if (!normalizedXml) return []
     const results: string[] = []
     for (const tag of tags) {
         const reg = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'ig')
         let match: RegExpExecArray | null
-        while ((match = reg.exec(xml)) !== null) {
+        while ((match = reg.exec(normalizedXml)) !== null) {
             if (match[1]) results.push(match[1])
         }
     }
@@ -65,20 +74,87 @@ const isLikelyMediaAssetUrl = (url: string): boolean => {
     return MEDIA_HOST_HINTS.some((hint) => lower.includes(hint))
 }
 
+const normalizeSnsAssetUrl = (url: string, token?: string, encIdx?: string): string => {
+    const base = decodeHtmlEntities(url).trim()
+    if (!base) return ''
+
+    let fixed = base.replace(/^http:\/\//i, 'https://')
+
+    const normalizedToken = decodeHtmlEntities(String(token || '')).trim()
+    const normalizedEncIdx = decodeHtmlEntities(String(encIdx || '')).trim()
+    const effectiveIdx = normalizedEncIdx || (normalizedToken ? '1' : '')
+    const appendParams: string[] = []
+    if (normalizedToken && !/[?&]token=/i.test(fixed)) {
+        appendParams.push(`token=${normalizedToken}`)
+    }
+    if (effectiveIdx && !/[?&]idx=/i.test(fixed)) {
+        appendParams.push(`idx=${effectiveIdx}`)
+    }
+    if (appendParams.length > 0) {
+        const connector = fixed.includes('?') ? '&' : '?'
+        fixed = `${fixed}${connector}${appendParams.join('&')}`
+    }
+    return fixed
+}
+
+const extractCardThumbMetaFromXml = (xml: string): { thumb?: string; thumbKey?: string } => {
+    const normalizedXml = normalizeRawXmlForParsing(xml)
+    if (!normalizedXml) return {}
+    const mediaMatch = normalizedXml.match(/<media>([\s\S]*?)<\/media>/i)
+    if (!mediaMatch?.[1]) return {}
+
+    const mediaXml = mediaMatch[1]
+    const thumbMatch = mediaXml.match(/<thumb([^>]*)>([^<]+)<\/thumb>/i)
+    if (!thumbMatch) return {}
+
+    const attrs = thumbMatch[1] || ''
+    const getAttr = (name: string): string | undefined => {
+        const reg = new RegExp(`${name}\\s*=\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s>]+))`, 'i')
+        const m = attrs.match(reg)
+        return decodeHtmlEntities((m?.[1] || m?.[2] || m?.[3] || '').trim()) || undefined
+    }
+    const thumbRawUrl = thumbMatch[2] || ''
+    const thumbToken = getAttr('token')
+    const thumbKey = getAttr('key')
+    const thumbEncIdx = getAttr('enc_idx')
+    const thumb = normalizeSnsAssetUrl(thumbRawUrl, thumbToken, thumbEncIdx)
+
+    return {
+        thumb: thumb || undefined,
+        thumbKey: thumbKey ? decodeHtmlEntities(thumbKey).trim() : undefined
+    }
+}
+
+const pickCardTitle = (post: SnsPost): string => {
+    const titleCandidates = [
+        post.linkTitle || '',
+        ...getXmlTagValues(post.rawXml || '', LINK_XML_TITLE_TAGS),
+        post.contentDesc || ''
+    ]
+    return titleCandidates
+        .map((value) => decodeHtmlEntities(value))
+        .find((value) => Boolean(value) && !/^https?:\/\//i.test(value)) || '网页链接'
+}
+
 const buildLinkCardData = (post: SnsPost): SnsLinkCardData | null => {
-    // type 3 是链接类型，直接用 media[0] 的 url 和 thumb
-    if (post.type === 3) {
-        const url = post.media[0]?.url || post.linkUrl
-        if (!url) return null
-        const titleCandidates = [
-            post.linkTitle || '',
-            ...getXmlTagValues(post.rawXml || '', LINK_XML_TITLE_TAGS),
-            post.contentDesc || ''
+    // type 3 / 5 是链接卡片类型，优先按卡片链接解析
+    if (post.type === 3 || post.type === 5) {
+        const thumbMeta = extractCardThumbMetaFromXml(post.rawXml || '')
+        const directUrlCandidates = [
+            post.linkUrl || '',
+            ...getXmlTagValues(post.rawXml || '', LINK_XML_DIRECT_URL_TAGS),
+            ...post.media.map((item) => item.url || '')
         ]
-        const title = titleCandidates
-            .map((v) => decodeHtmlEntities(v))
-            .find((v) => Boolean(v) && !/^https?:\/\//i.test(v))
-        return { url, title: title || '网页链接', thumb: post.media[0]?.thumb }
+        const url = directUrlCandidates
+            .map(normalizeUrlCandidate)
+            .find((value): value is string => Boolean(value))
+        if (!url) return null
+        return {
+            url,
+            title: pickCardTitle(post),
+            thumb: thumbMeta.thumb || post.media[0]?.thumb || post.media[0]?.url,
+            thumbKey: thumbMeta.thumbKey || post.media[0]?.key
+        }
     }
 
     const hasVideoMedia = post.type === 15 || post.media.some((item) => isSnsVideoUrl(item.url))
@@ -117,19 +193,9 @@ const buildLinkCardData = (post: SnsPost): SnsLinkCardData | null => {
 
     if (!linkUrl) return null
 
-    const titleCandidates = [
-        post.linkTitle || '',
-        ...getXmlTagValues(post.rawXml || '', LINK_XML_TITLE_TAGS),
-        post.contentDesc || ''
-    ]
-
-    const title = titleCandidates
-        .map((value) => decodeHtmlEntities(value))
-        .find((value) => Boolean(value) && !/^https?:\/\//i.test(value))
-
     return {
         url: linkUrl,
-        title: title || '网页链接',
+        title: pickCardTitle(post),
         thumb: post.media[0]?.thumb || post.media[0]?.url
     }
 }
@@ -158,8 +224,11 @@ const buildLocationText = (location?: SnsLocation): string => {
     return primary || region
 }
 
-const SnsLinkCard = ({ card }: { card: SnsLinkCardData }) => {
+const SnsLinkCard = ({ card, thumbKey }: { card: SnsLinkCardData; thumbKey?: string }) => {
     const [thumbFailed, setThumbFailed] = useState(false)
+    const [thumbSrc, setThumbSrc] = useState(card.thumb || '')
+    const [reloadNonce, setReloadNonce] = useState(0)
+    const retryCountRef = useRef(0)
     const hostname = useMemo(() => {
         try {
             return new URL(card.url).hostname.replace(/^www\./i, '')
@@ -167,6 +236,58 @@ const SnsLinkCard = ({ card }: { card: SnsLinkCardData }) => {
             return card.url
         }
     }, [card.url])
+
+    useEffect(() => {
+        retryCountRef.current = 0
+    }, [card.thumb, thumbKey])
+
+    const scheduleRetry = () => {
+        if (retryCountRef.current >= 2) return
+        retryCountRef.current += 1
+        window.setTimeout(() => {
+            setReloadNonce((v) => v + 1)
+        }, 900)
+    }
+
+    useEffect(() => {
+        const rawThumb = card.thumb || ''
+        setThumbFailed(false)
+        setThumbSrc(rawThumb)
+        if (!rawThumb) return
+
+        let cancelled = false
+        const loadThumb = async () => {
+            try {
+                const result = await window.electronAPI.sns.proxyImage({
+                    url: rawThumb,
+                    key: thumbKey
+                })
+                if (cancelled) return
+                if (!result.success) {
+                    console.warn('[SnsLinkCard] thumb decrypt failed', {
+                        url: rawThumb,
+                        key: thumbKey,
+                        error: result.error
+                    })
+                    scheduleRetry()
+                    return
+                }
+                if (result.dataUrl) {
+                    setThumbSrc(result.dataUrl)
+                    return
+                }
+                if (result.videoPath) {
+                    setThumbSrc(`file://${result.videoPath.replace(/\\/g, '/')}`)
+                }
+            } catch {
+                // noop: keep raw thumb fallback
+                scheduleRetry()
+            }
+        }
+
+        loadThumb()
+        return () => { cancelled = true }
+    }, [card.thumb, thumbKey, reloadNonce])
 
     const handleClick = async (e: React.MouseEvent<HTMLButtonElement>) => {
         e.stopPropagation()
@@ -180,13 +301,31 @@ const SnsLinkCard = ({ card }: { card: SnsLinkCardData }) => {
     return (
         <button type="button" className="post-link-card" onClick={handleClick}>
             <div className="link-thumb">
-                {card.thumb && !thumbFailed ? (
+                {thumbSrc && !thumbFailed ? (
                     <img
-                        src={card.thumb}
+                        src={thumbSrc}
                         alt=""
                         referrerPolicy="no-referrer"
                         loading="lazy"
-                        onError={() => setThumbFailed(true)}
+                        onError={() => {
+                            const rawThumb = card.thumb || ''
+                            if (thumbSrc !== rawThumb && rawThumb) {
+                                console.warn('[SnsLinkCard] thumb render failed, fallback raw thumb', {
+                                    failedSrc: thumbSrc,
+                                    rawThumb,
+                                    key: thumbKey
+                                })
+                                setThumbSrc(rawThumb)
+                                return
+                            }
+                            console.warn('[SnsLinkCard] thumb render failed, fallback exhausted', {
+                                failedSrc: thumbSrc,
+                                rawThumb,
+                                key: thumbKey
+                            })
+                            setThumbFailed(true)
+                            scheduleRetry()
+                        }}
                     />
                 ) : (
                     <div className="link-thumb-fallback">
@@ -278,9 +417,11 @@ export const SnsPostItem: React.FC<SnsPostItemProps> = ({ post, onPreview, onDeb
     const [deleting, setDeleting] = useState(false)
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
     const linkCard = buildLinkCardData(post)
+    const linkCardThumbKey = linkCard?.thumbKey || post.media[0]?.key
     const locationText = useMemo(() => buildLocationText(post.location), [post.location])
     const hasVideoMedia = post.type === 15 || post.media.some((item) => isSnsVideoUrl(item.url))
-    const showLinkCard = Boolean(linkCard) && post.media.length <= 1 && !hasVideoMedia
+    const isLinkCardType = post.type === 3 || post.type === 5
+    const showLinkCard = Boolean(linkCard) && !hasVideoMedia && (isLinkCardType || post.media.length <= 1)
     const showMediaGrid = post.media.length > 0 && !showLinkCard
 
     const formatTime = (ts: number) => {
@@ -412,7 +553,7 @@ export const SnsPostItem: React.FC<SnsPostItemProps> = ({ post, onPreview, onDeb
                 )}
 
                 {showLinkCard && linkCard && (
-                    <SnsLinkCard card={linkCard} />
+                    <SnsLinkCard card={linkCard} thumbKey={linkCardThumbKey} />
                 )}
 
                 {showMediaGrid && (

@@ -281,10 +281,10 @@
     }
   }
 
+  .floating-info,
   .floating-delete {
     position: absolute;
     top: 10px;
-    right: 10px;
     z-index: 4;
     width: 28px;
     height: 28px;
@@ -302,6 +302,18 @@
     transition: opacity 0.16s ease, transform 0.16s ease;
   }
 
+  .floating-info {
+    right: 10px;
+    border-color: color-mix(in srgb, var(--primary) 42%, var(--border-color));
+    color: var(--text-primary);
+  }
+
+  .floating-delete {
+    right: 44px;
+  }
+
+  .media-card:hover .floating-info,
+  .media-card:focus-within .floating-info,
   .media-card:hover .floating-delete,
   .media-card:focus-within .floating-delete {
     opacity: 1;
@@ -490,7 +502,9 @@
   .resource-dialog-mask {
     position: absolute;
     inset: 0;
-    background: rgba(8, 11, 18, 0.24);
+    background: rgba(8, 11, 18, 0.46);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -498,11 +512,13 @@
   }
 
   .resource-dialog {
+    --dialog-surface: color-mix(in srgb, var(--bg-primary, #ffffff) 82%, var(--card-inner-bg, #ffffff) 18%);
+    --dialog-surface-header: color-mix(in srgb, var(--dialog-surface) 90%, var(--bg-secondary, #ffffff) 10%);
     width: min(420px, calc(100% - 32px));
-    background: var(--card-bg, #ffffff);
+    background: var(--dialog-surface);
     border: 1px solid color-mix(in srgb, var(--border-color) 90%, transparent);
     border-radius: 14px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.22);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
     overflow: hidden;
   }
 
@@ -512,7 +528,7 @@
     font-weight: 600;
     color: var(--text-primary);
     border-bottom: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
-    background: color-mix(in srgb, var(--bg-secondary) 85%, transparent);
+    background: var(--dialog-surface-header);
   }
 
   .dialog-body {
@@ -521,6 +537,34 @@
     color: var(--text-secondary);
     line-height: 1.55;
     white-space: pre-wrap;
+    background: var(--dialog-surface);
+  }
+
+  .dialog-info-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .dialog-info-row {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 10px;
+    align-items: flex-start;
+  }
+
+  .info-label {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .info-value {
+    color: var(--text-primary);
+    line-height: 1.5;
+    word-break: break-all;
+    white-space: pre-wrap;
+    user-select: text;
   }
 
   .dialog-actions {
@@ -528,6 +572,7 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    background: var(--dialog-surface);
   }
 
   .dialog-btn {

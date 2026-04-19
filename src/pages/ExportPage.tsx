@@ -22,6 +22,8 @@ import {
   MessageSquare,
   MessageSquareText,
   Mic,
+  Pause,
+  Play,
   RefreshCw,
   Search,
   Square,
@@ -48,6 +50,8 @@ import {
 import {
   requestCancelBackgroundTask,
   requestCancelBackgroundTasks,
+  requestPauseBackgroundTask,
+  requestResumeBackgroundTask,
   subscribeBackgroundTasks
 } from '../services/backgroundTaskMonitor'
 import { useContactTypeCountsStore } from '../stores/contactTypeCountsStore'
@@ -105,7 +109,6 @@ interface ExportOptions {
   txtColumns: string[]
   displayNamePreference: DisplayNamePreference
   exportConcurrency: number
-  imageDeepSearchOnMiss: boolean
 }
 
 interface SessionRow extends AppChatSession {
@@ -175,6 +178,7 @@ interface ExportTask {
   title: string
   status: TaskStatus
   settledSessionIds?: string[]
+  sessionOutputPaths?: Record<string, string>
   createdAt: number
   startedAt?: number
   finishedAt?: number
@@ -209,6 +213,8 @@ interface AutomationTaskDraft {
   dateRangeConfig: ExportAutomationDateRangeConfig | string | null
   intervalDays: number
   intervalHours: number
+  firstTriggerAtEnabled: boolean
+  firstTriggerAtValue: string
   stopAtEnabled: boolean
   stopAtValue: string
   maxRunsEnabled: boolean
@@ -218,6 +224,7 @@ interface AutomationTaskDraft {
 const defaultTxtColumns = ['index', 'time', 'senderRole', 'messageType', 'content']
 const DETAIL_PRECISE_REFRESH_COOLDOWN_MS = 10 * 60 * 1000
 const TASK_PERFORMANCE_UPDATE_MIN_INTERVAL_MS = 900
+const EXPORT_PROGRESS_UI_FLUSH_INTERVAL_MS = 320
 const SESSION_MEDIA_METRIC_PREFETCH_ROWS = 10
 const SESSION_MEDIA_METRIC_BATCH_SIZE = 8
 const SESSION_MEDIA_METRIC_BACKGROUND_FEED_SIZE = 48
@@ -249,6 +256,8 @@ const backgroundTaskSourceLabels: Record<string, string> = {
 
 const backgroundTaskStatusLabels: Record<BackgroundTaskRecord['status'], string> = {
   running: '运行中',
+  pause_requested: '中断中',
+  paused: '已中断',
   cancel_requested: '停止中',
   completed: '已完成',
   failed: '失败',
@@ -322,6 +331,69 @@ const createEmptyProgress = (): TaskProgress => ({
   mediaBytesWritten: 0
 })
 
+const areStringArraysEqual = (left: string[], right: string[]): boolean => {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
+}
+
+const areTaskProgressEqual = (left: TaskProgress, right: TaskProgress): boolean => (
+  left.current === right.current &&
+  left.total === right.total &&
+  left.currentName === right.currentName &&
+  left.phase === right.phase &&
+  left.phaseLabel === right.phaseLabel &&
+  left.phaseProgress === right.phaseProgress &&
+  left.phaseTotal === right.phaseTotal &&
+  left.exportedMessages === right.exportedMessages &&
+  left.estimatedTotalMessages === right.estimatedTotalMessages &&
+  left.collectedMessages === right.collectedMessages &&
+  left.writtenFiles === right.writtenFiles &&
+  left.mediaDoneFiles === right.mediaDoneFiles &&
+  left.mediaCacheHitFiles === right.mediaCacheHitFiles &&
+  left.mediaCacheMissFiles === right.mediaCacheMissFiles &&
+  left.mediaCacheFillFiles === right.mediaCacheFillFiles &&
+  left.mediaDedupReuseFiles === right.mediaDedupReuseFiles &&
+  left.mediaBytesWritten === right.mediaBytesWritten
+)
+
+const normalizeProgressFloat = (value: unknown, digits = 3): number => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return 0
+  const factor = 10 ** digits
+  return Math.round(parsed * factor) / factor
+}
+
+const normalizeProgressInt = (value: unknown): number => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.floor(parsed))
+}
+
+const buildProgressPayloadSignature = (payload: ExportProgress): string => ([
+  String(payload.phase || ''),
+  String(payload.currentSessionId || ''),
+  String(payload.currentSession || ''),
+  String(payload.phaseLabel || ''),
+  normalizeProgressFloat(payload.current, 4),
+  normalizeProgressFloat(payload.total, 4),
+  normalizeProgressFloat(payload.phaseProgress, 2),
+  normalizeProgressFloat(payload.phaseTotal, 2),
+  normalizeProgressInt(payload.collectedMessages),
+  normalizeProgressInt(payload.exportedMessages),
+  normalizeProgressInt(payload.estimatedTotalMessages),
+  normalizeProgressInt(payload.writtenFiles),
+  normalizeProgressInt(payload.mediaDoneFiles),
+  normalizeProgressInt(payload.mediaCacheHitFiles),
+  normalizeProgressInt(payload.mediaCacheMissFiles),
+  normalizeProgressInt(payload.mediaCacheFillFiles),
+  normalizeProgressInt(payload.mediaDedupReuseFiles),
+  normalizeProgressInt(payload.mediaBytesWritten)
+].join('|'))
+
 const createEmptyTaskPerformance = (): TaskPerformance => ({
   stages: {
     collect: 0,
@@ -335,6 +407,15 @@ const createEmptyTaskPerformance = (): TaskPerformance => ({
 const isTextBatchTask = (task: ExportTask): boolean => (
   task.payload.scope === 'content' && task.payload.contentType === 'text'
 )
+
+const isImageExportTask = (task: ExportTask): boolean => {
+  if (task.payload.scope === 'sns') {
+    return Boolean(task.payload.snsOptions?.exportImages)
+  }
+  if (task.payload.scope !== 'content') return false
+  if (task.payload.contentType === 'image') return true
+  return Boolean(task.payload.options?.exportImages)
+}
 
 const resolvePerfStageByPhase = (phase?: ExportProgress['phase']): TaskPerfStage => {
   if (phase === 'preparing') return 'collect'
@@ -500,6 +581,35 @@ const getTaskStatusLabel = (task: ExportTask): string => {
   return '失败'
 }
 
+const resolveBackgroundTaskCardClass = (status: BackgroundTaskRecord['status']): 'running' | 'paused' | 'stopped' | 'success' | 'error' => {
+  if (status === 'running') return 'running'
+  if (status === 'pause_requested' || status === 'paused') return 'paused'
+  if (status === 'cancel_requested' || status === 'canceled') return 'stopped'
+  if (status === 'completed') return 'success'
+  return 'error'
+}
+
+const parseBackgroundTaskProgress = (progressText?: string): { current: number; total: number; ratio: number | null } => {
+  const normalized = String(progressText || '').trim()
+  if (!normalized) {
+    return { current: 0, total: 0, ratio: null }
+  }
+  const match = normalized.match(/(\d+)\s*\/\s*(\d+)/)
+  if (!match) {
+    return { current: 0, total: 0, ratio: null }
+  }
+  const current = Math.max(0, Math.floor(Number(match[1]) || 0))
+  const total = Math.max(0, Math.floor(Number(match[2]) || 0))
+  if (total <= 0) {
+    return { current, total, ratio: null }
+  }
+  return {
+    current,
+    total,
+    ratio: Math.max(0, Math.min(1, current / total))
+  }
+}
+
 const formatAbsoluteDate = (timestamp: number): string => {
   const d = new Date(timestamp)
   const y = d.getFullYear()
@@ -542,6 +652,32 @@ const formatPathBrief = (value: string, maxLength = 52): string => {
   const headLength = Math.max(10, Math.floor(maxLength * 0.55))
   const tailLength = Math.max(8, maxLength - headLength - 1)
   return `${normalized.slice(0, headLength)}…${normalized.slice(-tailLength)}`
+}
+
+const resolveParentDir = (value: string): string => {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  const noTrailing = normalized.replace(/[\\/]+$/, '')
+  if (!noTrailing) return normalized
+  const lastSlash = Math.max(noTrailing.lastIndexOf('/'), noTrailing.lastIndexOf('\\'))
+  if (lastSlash < 0) return normalized
+  if (lastSlash === 0) return noTrailing.slice(0, 1)
+  if (/^[A-Za-z]:$/.test(noTrailing.slice(0, lastSlash))) {
+    return `${noTrailing.slice(0, lastSlash)}\\`
+  }
+  return noTrailing.slice(0, lastSlash)
+}
+
+const resolveTaskOpenDir = (task: ExportTask): string => {
+  const sessionIds = Array.isArray(task.payload.sessionIds) ? task.payload.sessionIds : []
+  if (sessionIds.length === 1) {
+    const onlySessionId = String(sessionIds[0] || '').trim()
+    const outputPath = onlySessionId ? String(task.sessionOutputPaths?.[onlySessionId] || '').trim() : ''
+    if (outputPath) {
+      return resolveParentDir(outputPath) || task.payload.outputDir
+    }
+  }
+  return task.payload.outputDir
 }
 
 const formatRecentExportTime = (timestamp?: number, now = Date.now()): string => {
@@ -635,6 +771,11 @@ type ContactsDataSource = 'cache' | 'network' | null
 
 const normalizeAutomationIntervalDays = (value: unknown): number => Math.max(0, Math.floor(Number(value) || 0))
 const normalizeAutomationIntervalHours = (value: unknown): number => Math.max(0, Math.min(23, Math.floor(Number(value) || 0)))
+const normalizeAutomationFirstTriggerAt = (value: unknown): number => {
+  const numeric = Math.floor(Number(value) || 0)
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0
+  return numeric
+}
 
 const resolveAutomationIntervalMs = (schedule: ExportAutomationSchedule): number => {
   const days = normalizeAutomationIntervalDays(schedule.intervalDays)
@@ -642,6 +783,16 @@ const resolveAutomationIntervalMs = (schedule: ExportAutomationSchedule): number
   const totalHours = (days * 24) + hours
   if (totalHours <= 0) return 0
   return totalHours * 60 * 60 * 1000
+}
+
+const resolveAutomationInitialTriggerAt = (task: ExportAutomationTask): number | null => {
+  const intervalMs = resolveAutomationIntervalMs(task.schedule)
+  if (intervalMs <= 0) return null
+  const firstTriggerAt = normalizeAutomationFirstTriggerAt(task.schedule.firstTriggerAt)
+  if (firstTriggerAt > 0) return firstTriggerAt
+  const createdAt = Math.max(0, Math.floor(Number(task.createdAt || 0)))
+  if (!createdAt) return null
+  return createdAt + intervalMs
 }
 
 const formatAutomationScheduleLabel = (schedule: ExportAutomationSchedule): string => {
@@ -657,12 +808,60 @@ const resolveAutomationDueScheduleKey = (task: ExportAutomationTask, now: Date):
   const intervalMs = resolveAutomationIntervalMs(task.schedule)
   if (intervalMs <= 0) return null
   const nowMs = now.getTime()
-  const anchorAt = Math.max(
-    0,
-    Number(task.runState?.lastTriggeredAt || 0) || Number(task.createdAt || 0)
-  )
-  if (nowMs < anchorAt + intervalMs) return null
-  return `interval:${anchorAt}:${Math.floor((nowMs - anchorAt) / intervalMs)}`
+  const lastTriggeredAt = Math.max(0, Math.floor(Number(task.runState?.lastTriggeredAt || 0)))
+  if (lastTriggeredAt > 0) {
+    if (nowMs < lastTriggeredAt + intervalMs) return null
+    return `interval:${lastTriggeredAt}:${Math.floor((nowMs - lastTriggeredAt) / intervalMs)}`
+  }
+  const initialTriggerAt = resolveAutomationInitialTriggerAt(task)
+  if (!initialTriggerAt) return null
+  if (nowMs < initialTriggerAt) return null
+  return `first:${initialTriggerAt}`
+}
+
+const resolveAutomationFirstTriggerSummary = (task: ExportAutomationTask): string => {
+  const firstTriggerAt = normalizeAutomationFirstTriggerAt(task.schedule.firstTriggerAt)
+  if (firstTriggerAt <= 0) return '未指定（默认按创建时间+间隔）'
+  return new Date(firstTriggerAt).toLocaleString('zh-CN')
+}
+
+const buildAutomationSchedule = (
+  intervalDays: number,
+  intervalHours: number,
+  firstTriggerAt: number
+): ExportAutomationSchedule => ({
+  type: 'interval',
+  intervalDays,
+  intervalHours,
+  firstTriggerAt: firstTriggerAt > 0 ? firstTriggerAt : undefined
+})
+
+const buildAutomationDatePart = (timestamp: number): string => {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return ''
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const buildAutomationTodayDatePart = (): string => buildAutomationDatePart(Date.now())
+
+const normalizeAutomationDatePart = (value: string): string => {
+  const text = String(value || '').trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ''
+}
+
+const normalizeAutomationTimePart = (value: string): string => {
+  const text = String(value || '').trim()
+  if (!/^\d{2}:\d{2}$/.test(text)) return '00:00'
+  const [hoursText, minutesText] = text.split(':')
+  const hours = Math.floor(Number(hoursText))
+  const minutes = Math.floor(Number(minutesText))
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return '00:00'
+  const safeHours = Math.min(23, Math.max(0, hours))
+  const safeMinutes = Math.min(59, Math.max(0, minutes))
+  return `${`${safeHours}`.padStart(2, '0')}:${`${safeMinutes}`.padStart(2, '0')}`
 }
 
 const toDateTimeLocalValue = (timestamp: number): string => {
@@ -803,9 +1002,9 @@ const formatAutomationStopCondition = (task: ExportAutomationTask): string => {
 const resolveAutomationNextTriggerAt = (task: ExportAutomationTask): number | null => {
   const intervalMs = resolveAutomationIntervalMs(task.schedule)
   if (intervalMs <= 0) return null
-  const anchorAt = Math.max(0, Number(task.runState?.lastTriggeredAt || 0) || Number(task.createdAt || 0))
-  if (!anchorAt) return null
-  return anchorAt + intervalMs
+  const lastTriggeredAt = Math.max(0, Math.floor(Number(task.runState?.lastTriggeredAt || 0)))
+  if (lastTriggeredAt > 0) return lastTriggeredAt + intervalMs
+  return resolveAutomationInitialTriggerAt(task)
 }
 
 const formatAutomationCurrentState = (
@@ -1589,25 +1788,40 @@ const SectionInfoTooltip = memo(function SectionInfoTooltip({
 interface TaskCenterModalProps {
   isOpen: boolean
   tasks: ExportTask[]
+  chatBackgroundTasks: BackgroundTaskRecord[]
   taskRunningCount: number
   taskQueuedCount: number
   expandedPerfTaskId: string | null
   nowTick: number
   onClose: () => void
   onTogglePerfTask: (taskId: string) => void
+  onPauseBackgroundTask: (taskId: string) => void
+  onResumeBackgroundTask: (taskId: string) => void
+  onCancelBackgroundTask: (taskId: string) => void
 }
 
 const TaskCenterModal = memo(function TaskCenterModal({
   isOpen,
   tasks,
+  chatBackgroundTasks,
   taskRunningCount,
   taskQueuedCount,
   expandedPerfTaskId,
   nowTick,
   onClose,
-  onTogglePerfTask
+  onTogglePerfTask,
+  onPauseBackgroundTask,
+  onResumeBackgroundTask,
+  onCancelBackgroundTask
 }: TaskCenterModalProps) {
   if (!isOpen) return null
+  const chatActiveTaskCount = chatBackgroundTasks.filter(task => (
+    task.status === 'running' ||
+    task.status === 'pause_requested' ||
+    task.status === 'paused' ||
+    task.status === 'cancel_requested'
+  )).length
+  const totalTaskCount = tasks.length + chatBackgroundTasks.length
 
   return createPortal(
     <div
@@ -1624,7 +1838,7 @@ const TaskCenterModal = memo(function TaskCenterModal({
         <div className="task-center-modal-header">
           <div className="task-center-modal-title">
             <h3>任务中心</h3>
-            <span>进行中 {taskRunningCount} · 排队 {taskQueuedCount} · 总计 {tasks.length}</span>
+            <span>导出进行中 {taskRunningCount} · 排队 {taskQueuedCount} · 聊天后台 {chatActiveTaskCount} · 总计 {totalTaskCount}</span>
           </div>
           <button
             className="close-icon-btn"
@@ -1636,8 +1850,8 @@ const TaskCenterModal = memo(function TaskCenterModal({
           </button>
         </div>
         <div className="task-center-modal-body">
-          {tasks.length === 0 ? (
-            <div className="task-empty">暂无任务。点击会话导出或卡片导出后会在这里创建任务。</div>
+          {totalTaskCount === 0 ? (
+            <div className="task-empty">暂无任务。导出任务和聊天页批量语音/图片任务都会显示在这里。</div>
           ) : (
             <div className="task-list">
               {tasks.map(task => {
@@ -1705,6 +1919,24 @@ const TaskCenterModal = memo(function TaskCenterModal({
                 const currentSessionRatio = task.progress.phaseTotal > 0
                   ? Math.max(0, Math.min(1, task.progress.phaseProgress / task.progress.phaseTotal))
                   : null
+                const imageTask = isImageExportTask(task)
+                const imageTimingElapsedMs = imageTask
+                  ? Math.max(0, (
+                    typeof task.finishedAt === 'number'
+                      ? task.finishedAt
+                      : nowTick
+                  ) - (task.startedAt || task.createdAt))
+                  : 0
+                const imageTimingAvgMs = imageTask && mediaDoneFiles > 0
+                  ? Math.floor(imageTimingElapsedMs / Math.max(1, mediaDoneFiles))
+                  : 0
+                const imageTimingLabel = imageTask
+                  ? (
+                    mediaDoneFiles > 0
+                      ? `图片耗时 ${formatDurationMs(imageTimingElapsedMs)} · 平均 ${imageTimingAvgMs}ms/张`
+                      : `图片耗时 ${formatDurationMs(imageTimingElapsedMs)}`
+                  )
+                  : ''
                 return (
                   <div key={task.id} className={`task-card ${task.status}`}>
                     <div className="task-main">
@@ -1733,6 +1965,11 @@ const TaskCenterModal = memo(function TaskCenterModal({
                             {task.progress.phaseLabel ? ` · ${task.progress.phaseLabel}` : ''}
                           </div>
                         </>
+                      )}
+                      {imageTimingLabel && task.status !== 'queued' && (
+                        <div className="task-perf-summary">
+                          <span>{imageTimingLabel}</span>
+                        </div>
                       )}
                       {canShowPerfDetail && stageTotals && (
                         <div className="task-perf-summary">
@@ -1795,8 +2032,79 @@ const TaskCenterModal = memo(function TaskCenterModal({
                           {isPerfExpanded ? '收起详情' : '性能详情'}
                         </button>
                       )}
-                      <button className="task-action-btn" onClick={() => task.payload.outputDir && void window.electronAPI.shell.openPath(task.payload.outputDir)}>
+                      <button
+                        className="task-action-btn"
+                        onClick={() => {
+                          const openDir = resolveTaskOpenDir(task)
+                          if (!openDir) return
+                          void window.electronAPI.shell.openPath(openDir)
+                        }}
+                      >
                         <FolderOpen size={14} /> 目录
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+              {chatBackgroundTasks.map(task => {
+                const taskCardClass = resolveBackgroundTaskCardClass(task.status)
+                const progress = parseBackgroundTaskProgress(task.progressText)
+                const canPause = task.resumable && task.status === 'running'
+                const canResume = task.resumable && (task.status === 'paused' || task.status === 'pause_requested')
+                const canCancel = task.cancelable && (
+                  task.status === 'running' ||
+                  task.status === 'pause_requested' ||
+                  task.status === 'paused' ||
+                  task.status === 'cancel_requested'
+                )
+                return (
+                  <div key={task.id} className={`task-card ${taskCardClass}`}>
+                    <div className="task-main">
+                      <div className="task-title">{task.title}</div>
+                      <div className="task-meta">
+                        <span className={`task-status ${taskCardClass}`}>{backgroundTaskStatusLabels[task.status]}</span>
+                        <span>{backgroundTaskSourceLabels[task.sourcePage] || backgroundTaskSourceLabels.other}</span>
+                        <span>{new Date(task.startedAt).toLocaleString('zh-CN')}</span>
+                      </div>
+                      {progress.ratio !== null && (
+                        <div className="task-progress-bar">
+                          <div
+                            className="task-progress-fill"
+                            style={{ width: `${progress.ratio * 100}%` }}
+                          />
+                        </div>
+                      )}
+                      <div className="task-progress-text">
+                        {task.detail || '任务进行中'}
+                        {task.progressText ? ` · ${task.progressText}` : ''}
+                      </div>
+                    </div>
+                    <div className="task-actions">
+                      {canPause && (
+                        <button
+                          className="task-action-btn"
+                          type="button"
+                          onClick={() => onPauseBackgroundTask(task.id)}
+                        >
+                          <Pause size={14} /> 中断
+                        </button>
+                      )}
+                      {canResume && (
+                        <button
+                          className="task-action-btn primary"
+                          type="button"
+                          onClick={() => onResumeBackgroundTask(task.id)}
+                        >
+                          <Play size={14} /> 继续
+                        </button>
+                      )}
+                      <button
+                        className="task-action-btn danger"
+                        type="button"
+                        onClick={() => onCancelBackgroundTask(task.id)}
+                        disabled={!canCancel || task.status === 'cancel_requested'}
+                      >
+                        {task.status === 'cancel_requested' ? '停止中' : '停止'}
                       </button>
                     </div>
                   </div>
@@ -1903,7 +2211,6 @@ function ExportPage() {
   const [exportDefaultVoiceAsText, setExportDefaultVoiceAsText] = useState(false)
   const [exportDefaultExcelCompactColumns, setExportDefaultExcelCompactColumns] = useState(true)
   const [exportDefaultConcurrency, setExportDefaultConcurrency] = useState(2)
-  const [exportDefaultImageDeepSearchOnMiss, setExportDefaultImageDeepSearchOnMiss] = useState(true)
 
   const [options, setOptions] = useState<ExportOptions>({
     format: 'json',
@@ -1924,8 +2231,7 @@ function ExportPage() {
     excelCompactColumns: true,
     txtColumns: defaultTxtColumns,
     displayNamePreference: 'remark',
-    exportConcurrency: 2,
-    imageDeepSearchOnMiss: true
+    exportConcurrency: 2
   })
 
   const [exportDialog, setExportDialog] = useState<ExportDialogState>({
@@ -2622,7 +2928,7 @@ function ExportPage() {
     automationTasksReadyRef.current = false
     let isReady = true
     try {
-      const [savedPath, savedFormat, savedAvatars, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedImageDeepSearchOnMiss, savedSessionMap, savedContentMap, savedSessionRecordMap, savedSnsPostCount, savedWriteLayout, savedSessionNameWithTypePrefix, savedDefaultDateRange, savedFileNamingMode, exportCacheScope] = await Promise.all([
+      const [savedPath, savedFormat, savedAvatars, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedSessionMap, savedContentMap, savedSessionRecordMap, savedSnsPostCount, savedWriteLayout, savedSessionNameWithTypePrefix, savedDefaultDateRange, savedFileNamingMode, exportCacheScope] = await Promise.all([
         configService.getExportPath(),
         configService.getExportDefaultFormat(),
         configService.getExportDefaultAvatars(),
@@ -2631,7 +2937,6 @@ function ExportPage() {
         configService.getExportDefaultExcelCompactColumns(),
         configService.getExportDefaultTxtColumns(),
         configService.getExportDefaultConcurrency(),
-        configService.getExportDefaultImageDeepSearchOnMiss(),
         configService.getExportLastSessionRunMap(),
         configService.getExportLastContentRunMap(),
         configService.getExportSessionRecordMap(),
@@ -2671,7 +2976,6 @@ function ExportPage() {
       setExportDefaultVoiceAsText(savedVoiceAsText ?? false)
       setExportDefaultExcelCompactColumns(savedExcelCompactColumns ?? true)
       setExportDefaultConcurrency(savedConcurrency ?? 2)
-      setExportDefaultImageDeepSearchOnMiss(savedImageDeepSearchOnMiss ?? true)
       setExportDefaultFileNamingMode(savedFileNamingMode ?? 'classic')
       setAutomationTasks(automationTaskItem?.tasks || [])
       automationTasksReadyRef.current = true
@@ -2709,8 +3013,7 @@ function ExportPage() {
         exportVoiceAsText: savedVoiceAsText ?? prev.exportVoiceAsText,
         excelCompactColumns: savedExcelCompactColumns ?? prev.excelCompactColumns,
         txtColumns,
-        exportConcurrency: savedConcurrency ?? prev.exportConcurrency,
-        imageDeepSearchOnMiss: savedImageDeepSearchOnMiss ?? prev.imageDeepSearchOnMiss
+        exportConcurrency: savedConcurrency ?? prev.exportConcurrency
       }))
     } catch (error) {
       isReady = false
@@ -4491,8 +4794,7 @@ function ExportPage() {
         maxFileSizeMb: prev.maxFileSizeMb,
         exportVoiceAsText: exportDefaultVoiceAsText,
         excelCompactColumns: exportDefaultExcelCompactColumns,
-        exportConcurrency: exportDefaultConcurrency,
-        imageDeepSearchOnMiss: exportDefaultImageDeepSearchOnMiss
+        exportConcurrency: exportDefaultConcurrency
       }
 
       if (payload.scope === 'sns') {
@@ -4527,8 +4829,7 @@ function ExportPage() {
     exportDefaultAvatars,
     exportDefaultMedia,
     exportDefaultVoiceAsText,
-    exportDefaultConcurrency,
-    exportDefaultImageDeepSearchOnMiss
+    exportDefaultConcurrency
   ])
 
   const closeExportDialog = useCallback(() => {
@@ -4755,7 +5056,6 @@ function ExportPage() {
       txtColumns: options.txtColumns,
       displayNamePreference: options.displayNamePreference,
       exportConcurrency: options.exportConcurrency,
-      imageDeepSearchOnMiss: options.imageDeepSearchOnMiss,
       fileNamingMode: exportDefaultFileNamingMode,
       sessionLayout,
       sessionNameWithTypePrefix,
@@ -4834,6 +5134,7 @@ function ExportPage() {
 
   const openEditAutomationTaskDraft = useCallback((task: ExportAutomationTask) => {
     const schedule = task.schedule
+    const firstTriggerAt = normalizeAutomationFirstTriggerAt(schedule.firstTriggerAt)
     const stopAt = Number(task.stopCondition?.endAt || 0)
     const maxRuns = Number(task.stopCondition?.maxRuns || 0)
     const resolvedRange = resolveAutomationDateRangeSelection(task.template.dateRangeConfig as any, new Date())
@@ -4854,6 +5155,8 @@ function ExportPage() {
       dateRangeConfig: task.template.dateRangeConfig,
       intervalDays: normalizeAutomationIntervalDays(schedule.intervalDays),
       intervalHours: normalizeAutomationIntervalHours(schedule.intervalHours),
+      firstTriggerAtEnabled: firstTriggerAt > 0,
+      firstTriggerAtValue: firstTriggerAt > 0 ? toDateTimeLocalValue(firstTriggerAt) : '',
       stopAtEnabled: stopAt > 0,
       stopAtValue: stopAt > 0 ? toDateTimeLocalValue(stopAt) : '',
       maxRunsEnabled: maxRuns > 0,
@@ -4959,7 +5262,18 @@ function ExportPage() {
       window.alert('执行间隔不能为 0，请至少设置天数或小时')
       return
     }
-    const schedule: ExportAutomationSchedule = { type: 'interval', intervalDays, intervalHours }
+    const firstTriggerAtTimestamp = automationTaskDraft.firstTriggerAtEnabled
+      ? parseDateTimeLocalValue(automationTaskDraft.firstTriggerAtValue)
+      : null
+    if (automationTaskDraft.firstTriggerAtEnabled && !firstTriggerAtTimestamp) {
+      window.alert('请填写有效的首次触发时间')
+      return
+    }
+    const schedule = buildAutomationSchedule(
+      intervalDays,
+      intervalHours,
+      firstTriggerAtTimestamp && firstTriggerAtTimestamp > 0 ? firstTriggerAtTimestamp : 0
+    )
     const stopAtTimestamp = automationTaskDraft.stopAtEnabled
       ? parseDateTimeLocalValue(automationTaskDraft.stopAtValue)
       : null
@@ -5146,14 +5460,10 @@ function ExportPage() {
     const settledSessionIdsFromProgress = new Set<string>()
     const sessionMessageProgress = new Map<string, { exported: number; total: number; knownTotal: boolean }>()
     let queuedProgressPayload: ExportProgress | null = null
-    let queuedProgressRaf: number | null = null
+    let queuedProgressSignature = ''
     let queuedProgressTimer: number | null = null
 
     const clearQueuedProgress = () => {
-      if (queuedProgressRaf !== null) {
-        window.cancelAnimationFrame(queuedProgressRaf)
-        queuedProgressRaf = null
-      }
       if (queuedProgressTimer !== null) {
         window.clearTimeout(queuedProgressTimer)
         queuedProgressTimer = null
@@ -5205,6 +5515,7 @@ function ExportPage() {
       if (!queuedProgressPayload) return
       const payload = queuedProgressPayload
       queuedProgressPayload = null
+      queuedProgressSignature = ''
       const now = Date.now()
       const currentSessionId = String(payload.currentSessionId || '').trim()
       updateTask(next.id, task => {
@@ -5261,77 +5572,71 @@ function ExportPage() {
         const mediaBytesWritten = Number.isFinite(payload.mediaBytesWritten)
           ? Math.max(prevMediaBytesWritten, Math.max(0, Math.floor(Number(payload.mediaBytesWritten || 0))))
           : prevMediaBytesWritten
+        const nextProgress: TaskProgress = {
+          current: payload.current,
+          total: payload.total,
+          currentName: payload.currentSession || '',
+          phase: payload.phase,
+          phaseLabel: payload.phaseLabel || '',
+          phaseProgress: payload.phaseProgress || 0,
+          phaseTotal: payload.phaseTotal || 0,
+          exportedMessages: Math.max(task.progress.exportedMessages, aggregatedMessageProgress.exported),
+          estimatedTotalMessages: aggregatedMessageProgress.estimated > 0
+            ? Math.max(task.progress.estimatedTotalMessages, aggregatedMessageProgress.estimated)
+            : (task.progress.estimatedTotalMessages > 0 ? task.progress.estimatedTotalMessages : 0),
+          collectedMessages: Math.max(task.progress.collectedMessages, collectedMessages),
+          writtenFiles,
+          mediaDoneFiles,
+          mediaCacheHitFiles,
+          mediaCacheMissFiles,
+          mediaCacheFillFiles,
+          mediaDedupReuseFiles,
+          mediaBytesWritten
+        }
+        const hasSettledListChanged = !areStringArraysEqual(settledSessionIds, nextSettledSessionIds)
+        const hasProgressChanged = !areTaskProgressEqual(task.progress, nextProgress)
+        const hasPerformanceChanged = performance !== task.performance
+        if (!hasSettledListChanged && !hasProgressChanged && !hasPerformanceChanged) {
+          return task
+        }
         return {
           ...task,
-          progress: {
-            current: payload.current,
-            total: payload.total,
-            currentName: payload.currentSession,
-            phase: payload.phase,
-            phaseLabel: payload.phaseLabel || '',
-            phaseProgress: payload.phaseProgress || 0,
-            phaseTotal: payload.phaseTotal || 0,
-            exportedMessages: Math.max(task.progress.exportedMessages, aggregatedMessageProgress.exported),
-            estimatedTotalMessages: aggregatedMessageProgress.estimated > 0
-              ? Math.max(task.progress.estimatedTotalMessages, aggregatedMessageProgress.estimated)
-              : (task.progress.estimatedTotalMessages > 0 ? task.progress.estimatedTotalMessages : 0),
-            collectedMessages: Math.max(task.progress.collectedMessages, collectedMessages),
-            writtenFiles,
-            mediaDoneFiles,
-            mediaCacheHitFiles,
-            mediaCacheMissFiles,
-            mediaCacheFillFiles,
-            mediaDedupReuseFiles,
-            mediaBytesWritten
-          },
-          settledSessionIds: nextSettledSessionIds,
-          performance
+          progress: hasProgressChanged ? nextProgress : task.progress,
+          settledSessionIds: hasSettledListChanged ? nextSettledSessionIds : settledSessionIds,
+          performance: hasPerformanceChanged ? performance : task.performance
         }
       })
     }
 
     const queueProgressUpdate = (payload: ExportProgress) => {
+      const signature = buildProgressPayloadSignature(payload)
+      if (queuedProgressPayload && signature === queuedProgressSignature) {
+        return
+      }
       queuedProgressPayload = payload
+      queuedProgressSignature = signature
       if (payload.phase === 'complete') {
         clearQueuedProgress()
         flushQueuedProgress()
         return
       }
-      if (queuedProgressRaf !== null || queuedProgressTimer !== null) return
-      queuedProgressRaf = window.requestAnimationFrame(() => {
-        queuedProgressRaf = null
-        queuedProgressTimer = window.setTimeout(() => {
-          queuedProgressTimer = null
-          flushQueuedProgress()
-        }, 180)
-      })
+      if (queuedProgressTimer !== null) return
+      queuedProgressTimer = window.setTimeout(() => {
+        queuedProgressTimer = null
+        flushQueuedProgress()
+      }, EXPORT_PROGRESS_UI_FLUSH_INTERVAL_MS)
     }
     if (next.payload.scope === 'sns') {
       progressUnsubscribeRef.current = window.electronAPI.sns.onExportProgress((payload) => {
-        updateTask(next.id, task => {
-          if (task.status !== 'running') return task
-          return {
-            ...task,
-            progress: {
-              current: payload.current || 0,
-              total: payload.total || 0,
-              currentName: '',
-              phase: 'exporting',
-              phaseLabel: payload.status || '',
-              phaseProgress: payload.total > 0 ? payload.current : 0,
-              phaseTotal: payload.total || 0,
-              exportedMessages: payload.total > 0 ? Math.max(0, Math.floor(payload.current || 0)) : task.progress.exportedMessages,
-              estimatedTotalMessages: payload.total > 0 ? Math.max(0, Math.floor(payload.total || 0)) : task.progress.estimatedTotalMessages,
-              collectedMessages: task.progress.collectedMessages,
-              writtenFiles: task.progress.writtenFiles,
-              mediaDoneFiles: task.progress.mediaDoneFiles,
-              mediaCacheHitFiles: task.progress.mediaCacheHitFiles,
-              mediaCacheMissFiles: task.progress.mediaCacheMissFiles,
-              mediaCacheFillFiles: task.progress.mediaCacheFillFiles,
-              mediaDedupReuseFiles: task.progress.mediaDedupReuseFiles,
-              mediaBytesWritten: task.progress.mediaBytesWritten
-            }
-          }
+        queueProgressUpdate({
+          current: Number(payload.current || 0),
+          total: Number(payload.total || 0),
+          currentSession: '',
+          currentSessionId: '',
+          phase: 'exporting',
+          phaseLabel: String(payload.status || ''),
+          phaseProgress: payload.total > 0 ? Number(payload.current || 0) : 0,
+          phaseTotal: Number(payload.total || 0)
         })
       })
     } else {
@@ -5444,6 +5749,12 @@ function ExportPage() {
             ...task,
             status: 'success',
             finishedAt: doneAt,
+            sessionOutputPaths: {
+              ...(task.sessionOutputPaths || {}),
+              ...((result.sessionOutputPaths && typeof result.sessionOutputPaths === 'object')
+                ? result.sessionOutputPaths
+                : {})
+            },
             progress: {
               ...task.progress,
               current: task.progress.total || next.payload.sessionIds.length,
@@ -5656,6 +5967,8 @@ function ExportPage() {
         dateRangeConfig: serializeExportDateRangeConfig(normalizedRangeSelection),
         intervalDays: 1,
         intervalHours: 0,
+        firstTriggerAtEnabled: false,
+        firstTriggerAtValue: '',
         stopAtEnabled: false,
         stopAtValue: '',
         maxRunsEnabled: false,
@@ -5691,8 +6004,6 @@ function ExportPage() {
     await configService.setExportDefaultExcelCompactColumns(options.excelCompactColumns)
     await configService.setExportDefaultTxtColumns(options.txtColumns)
     await configService.setExportDefaultConcurrency(options.exportConcurrency)
-    await configService.setExportDefaultImageDeepSearchOnMiss(options.imageDeepSearchOnMiss)
-    setExportDefaultImageDeepSearchOnMiss(options.imageDeepSearchOnMiss)
   }
 
   const openSingleExport = useCallback((session: SessionRow) => {
@@ -7336,11 +7647,23 @@ function ExportPage() {
   const handleCancelBackgroundTask = useCallback((taskId: string) => {
     requestCancelBackgroundTask(taskId)
   }, [])
+  const handlePauseBackgroundTask = useCallback((taskId: string) => {
+    requestPauseBackgroundTask(taskId)
+  }, [])
+  const handleResumeBackgroundTask = useCallback((taskId: string) => {
+    requestResumeBackgroundTask(taskId)
+  }, [])
   const handleCancelAllNonExportTasks = useCallback(() => {
     requestCancelBackgroundTasks(task => (
       task.sourcePage !== 'export' &&
+      task.sourcePage !== 'chat' &&
       task.cancelable &&
-      (task.status === 'running' || task.status === 'cancel_requested')
+      (
+        task.status === 'running' ||
+        task.status === 'pause_requested' ||
+        task.status === 'paused' ||
+        task.status === 'cancel_requested'
+      )
     ))
   }, [])
 
@@ -7393,14 +7716,6 @@ function ExportPage() {
   const useCollapsedSessionFormatSelector = isSessionScopeDialog || isContentTextDialog
   const shouldShowFormatSection = !isContentScopeDialog || isContentTextDialog
   const shouldShowMediaSection = !isContentScopeDialog
-  const shouldRenderImageDeepSearchToggle = exportDialog.scope !== 'sns' && (
-    isSessionScopeDialog ||
-    (isContentScopeDialog && exportDialog.contentType === 'image')
-  )
-  const shouldShowImageDeepSearchToggle = exportDialog.scope !== 'sns' && (
-    (isSessionScopeDialog && options.exportImages) ||
-    (isContentScopeDialog && exportDialog.contentType === 'image')
-  )
   const avatarExportStatusLabel = options.exportAvatars ? '已开启聊天消息导出带头像' : '已关闭聊天消息导出带头像'
   const contentTextDialogSummary = '此模式只导出聊天文本，不包含图片语音视频表情包等多媒体文件。'
   const activeDialogFormatLabel = exportDialog.scope === 'sns'
@@ -7496,7 +7811,18 @@ function ExportPage() {
   const isSnsCardStatsLoading = !hasSeededSnsStats
   const taskRunningCount = tasks.filter(task => task.status === 'running').length
   const taskQueuedCount = tasks.filter(task => task.status === 'queued').length
-  const taskCenterAlertCount = taskRunningCount + taskQueuedCount
+  const chatBackgroundTasks = useMemo(() => (
+    backgroundTasks.filter(task => task.sourcePage === 'chat')
+  ), [backgroundTasks])
+  const chatBackgroundActiveTaskCount = useMemo(() => (
+    chatBackgroundTasks.filter(task => (
+      task.status === 'running' ||
+      task.status === 'pause_requested' ||
+      task.status === 'paused' ||
+      task.status === 'cancel_requested'
+    )).length
+  ), [chatBackgroundTasks])
+  const taskCenterAlertCount = taskRunningCount + taskQueuedCount + chatBackgroundActiveTaskCount
   const hasFilteredContacts = filteredContacts.length > 0
   const optionalMetricColumnCount = (shouldShowSnsColumn ? 1 : 0) + (shouldShowMutualFriendsColumn ? 1 : 0)
   const contactsMetricColumnCount = 4 + optionalMetricColumnCount
@@ -7511,15 +7837,25 @@ function ExportPage() {
     width: `${Math.max(contactsHorizontalScrollMetrics.contentWidth, contactsHorizontalScrollMetrics.viewportWidth)}px`
   }), [contactsHorizontalScrollMetrics.contentWidth, contactsHorizontalScrollMetrics.viewportWidth])
   const nonExportBackgroundTasks = useMemo(() => (
-    backgroundTasks.filter(task => task.sourcePage !== 'export')
+    backgroundTasks.filter(task => task.sourcePage !== 'export' && task.sourcePage !== 'chat')
   ), [backgroundTasks])
   const runningNonExportTaskCount = useMemo(() => (
-    nonExportBackgroundTasks.filter(task => task.status === 'running' || task.status === 'cancel_requested').length
+    nonExportBackgroundTasks.filter(task => (
+      task.status === 'running' ||
+      task.status === 'pause_requested' ||
+      task.status === 'paused' ||
+      task.status === 'cancel_requested'
+    )).length
   ), [nonExportBackgroundTasks])
   const cancelableNonExportTaskCount = useMemo(() => (
     nonExportBackgroundTasks.filter(task => (
       task.cancelable &&
-      (task.status === 'running' || task.status === 'cancel_requested')
+      (
+        task.status === 'running' ||
+        task.status === 'pause_requested' ||
+        task.status === 'paused' ||
+        task.status === 'cancel_requested'
+      )
     )).length
   ), [nonExportBackgroundTasks])
   const nonExportBackgroundTasksUpdatedAt = useMemo(() => (
@@ -8139,12 +8475,16 @@ function ExportPage() {
       <TaskCenterModal
         isOpen={isTaskCenterOpen}
         tasks={tasks}
+        chatBackgroundTasks={chatBackgroundTasks}
         taskRunningCount={taskRunningCount}
         taskQueuedCount={taskQueuedCount}
         expandedPerfTaskId={expandedPerfTaskId}
         nowTick={nowTick}
         onClose={closeTaskCenter}
         onTogglePerfTask={toggleTaskPerfDetail}
+        onPauseBackgroundTask={handlePauseBackgroundTask}
+        onResumeBackgroundTask={handleResumeBackgroundTask}
+        onCancelBackgroundTask={handleCancelBackgroundTask}
       />
 
       {isAutomationModalOpen && createPortal(
@@ -8220,6 +8560,7 @@ function ExportPage() {
                             {queueState === 'queued' && <span className="automation-task-status queued">排队中</span>}
                           </div>
                           <p>{formatAutomationScheduleLabel(task.schedule)}</p>
+                          <p>首次触发：{resolveAutomationFirstTriggerSummary(task)}</p>
                           <p>时间范围：{formatAutomationRangeLabel(task.template.dateRangeConfig as any)}</p>
                           <p>会话范围：{task.sessionIds.length} 个</p>
                           <p>导出目录：{task.outputDir || `${exportFolder || '未设置'}（全局）`}</p>
@@ -8331,6 +8672,52 @@ function ExportPage() {
                     } : prev)}
                   />
                 </label>
+              </div>
+
+              <div className="automation-form-field">
+                <span>首次触发时间（可选）</span>
+                <label className="automation-inline-check">
+                  <input
+                    type="checkbox"
+                    checked={automationTaskDraft.firstTriggerAtEnabled}
+                    onChange={(event) => setAutomationTaskDraft((prev) => prev ? {
+                      ...prev,
+                      firstTriggerAtEnabled: event.target.checked
+                    } : prev)}
+                  />
+                  指定第一次触发时间
+                </label>
+                {automationTaskDraft.firstTriggerAtEnabled && (
+                  <div className="automation-first-trigger-picker">
+                    <input
+                      type="date"
+                      className="automation-stopat-date"
+                      value={automationTaskDraft.firstTriggerAtValue ? automationTaskDraft.firstTriggerAtValue.slice(0, 10) : ''}
+                      onChange={(event) => {
+                        const datePart = normalizeAutomationDatePart(event.target.value)
+                        const timePart = normalizeAutomationTimePart(automationTaskDraft.firstTriggerAtValue?.slice(11) || '00:00')
+                        setAutomationTaskDraft((prev) => prev ? {
+                          ...prev,
+                          firstTriggerAtValue: datePart ? `${datePart}T${timePart}` : ''
+                        } : prev)
+                      }}
+                    />
+                    <input
+                      type="time"
+                      className="automation-stopat-time"
+                      value={automationTaskDraft.firstTriggerAtValue ? normalizeAutomationTimePart(automationTaskDraft.firstTriggerAtValue.slice(11)) : '00:00'}
+                      onChange={(event) => {
+                        const timePart = normalizeAutomationTimePart(event.target.value)
+                        const datePart = normalizeAutomationDatePart(automationTaskDraft.firstTriggerAtValue?.slice(0, 10))
+                          || buildAutomationTodayDatePart()
+                        setAutomationTaskDraft((prev) => prev ? {
+                          ...prev,
+                          firstTriggerAtValue: `${datePart}T${timePart}`
+                        } : prev)
+                      }}
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="automation-form-field">
@@ -8473,7 +8860,11 @@ function ExportPage() {
               </label>
 
               <div className="automation-draft-summary">
-                会话：{automationTaskDraft.sessionIds.length} 个 · 间隔：{automationTaskDraft.intervalDays} 天 {automationTaskDraft.intervalHours} 小时 · 时间：{formatAutomationRangeLabel(automationTaskDraft.dateRangeConfig as any, automationRangeSelection)} · 条件：有新消息才导出
+                会话：{automationTaskDraft.sessionIds.length} 个 · 间隔：{automationTaskDraft.intervalDays} 天 {automationTaskDraft.intervalHours} 小时 · 首次：{
+                  automationTaskDraft.firstTriggerAtEnabled
+                    ? (automationTaskDraft.firstTriggerAtValue ? automationTaskDraft.firstTriggerAtValue.replace('T', ' ') : '未设置')
+                    : '默认按创建时间+间隔'
+                } · 时间：{formatAutomationRangeLabel(automationTaskDraft.dateRangeConfig as any, automationRangeSelection)} · 条件：有新消息才导出
               </div>
             </div>
             <div className="automation-editor-actions">
@@ -8946,7 +9337,12 @@ function ExportPage() {
                               type="button"
                               className="session-load-detail-task-stop-btn"
                               onClick={() => handleCancelBackgroundTask(task.id)}
-                              disabled={!task.cancelable || (task.status !== 'running' && task.status !== 'cancel_requested')}
+                              disabled={!task.cancelable || (
+                                task.status !== 'running' &&
+                                task.status !== 'pause_requested' &&
+                                task.status !== 'paused' &&
+                                task.status !== 'cancel_requested'
+                              )}
                             >
                               停止
                             </button>
@@ -9707,30 +10103,6 @@ function ExportPage() {
                       </div>
                     </div>
                   )}
-                </div>
-              )}
-
-              {shouldRenderImageDeepSearchToggle && (
-                <div className={`dialog-collapse-slot ${shouldShowImageDeepSearchToggle ? 'open' : ''}`} aria-hidden={!shouldShowImageDeepSearchToggle}>
-                  <div className="dialog-collapse-inner">
-                    <div className="dialog-section">
-                      <div className="dialog-switch-row">
-                        <div className="dialog-switch-copy">
-                          <h4>缺图时深度搜索</h4>
-                          <div className="format-note">关闭后仅尝试 hardlink 命中，未命中将直接显示占位符，导出速度更快。</div>
-                        </div>
-                        <button
-                          type="button"
-                          className={`dialog-switch ${options.imageDeepSearchOnMiss ? 'on' : ''}`}
-                          aria-pressed={options.imageDeepSearchOnMiss}
-                          aria-label="切换缺图时深度搜索"
-                          onClick={() => setOptions(prev => ({ ...prev, imageDeepSearchOnMiss: !prev.imageDeepSearchOnMiss }))}
-                        >
-                          <span className="dialog-switch-thumb" />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
                 </div>
               )}
 

@@ -4,6 +4,7 @@ type PreloadImagePayload = {
   sessionId?: string
   imageMd5?: string
   imageDatName?: string
+  createTime?: number
 }
 
 type PreloadOptions = {
@@ -74,15 +75,24 @@ export class ImagePreloadService {
         sessionId: task.sessionId,
         imageMd5: task.imageMd5,
         imageDatName: task.imageDatName,
+        createTime: task.createTime,
+        preferFilePath: true,
+        hardlinkOnly: true,
         disableUpdateCheck: !task.allowDecrypt,
-        allowCacheIndex: task.allowCacheIndex
+        allowCacheIndex: task.allowCacheIndex,
+        suppressEvents: true
       })
       if (cached.success) return
       if (!task.allowDecrypt) return
       await imageDecryptService.decryptImage({
         sessionId: task.sessionId,
         imageMd5: task.imageMd5,
-        imageDatName: task.imageDatName
+        imageDatName: task.imageDatName,
+        createTime: task.createTime,
+        preferFilePath: true,
+        hardlinkOnly: true,
+        disableUpdateCheck: true,
+        suppressEvents: true
       })
     } catch {
       // ignore preload failures

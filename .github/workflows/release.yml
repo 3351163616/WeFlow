@@ -27,7 +27,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -44,7 +43,7 @@ jobs:
           npx tsc
           npx vite build
 
-      - name: Package and Publish macOS arm64 (unsigned DMG)
+      - name: Package and Publish macOS arm64 (unsigned DMG + ZIP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -52,22 +51,28 @@ jobs:
         run: |
           export ELECTRON_BUILDER_BINARIES_MIRROR="https://github.com/electron-userland/electron-builder-binaries/releases/download/"
           echo "Using ELECTRON_BUILDER_BINARIES_MIRROR=$ELECTRON_BUILDER_BINARIES_MIRROR"
-          npx electron-builder --mac dmg --arm64 --publish always
+          npx electron-builder --mac dmg zip --arm64 --publish always
 
       - name: Inject minimumVersion into latest yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           TAG=${GITHUB_REF_NAME}
           REPO=${{ github.repository }}
           MINIMUM_VERSION="4.1.7"
+          wait_for_release_id "$REPO" "$TAG" 12 2 >/dev/null
           for YML_FILE in latest-mac.yml latest-arm64-mac.yml; do
-            gh release download "$TAG" --repo "$REPO" --pattern "$YML_FILE" --output "/tmp/$YML_FILE" 2>/dev/null || continue
+            if ! retry_cmd 5 3 gh release download "$TAG" --repo "$REPO" --pattern "$YML_FILE" --output "/tmp/$YML_FILE"; then
+              echo "Skip $YML_FILE because download failed after retries."
+              continue
+            fi
             if ! grep -q 'minimumVersion' "/tmp/$YML_FILE"; then
               echo "minimumVersion: $MINIMUM_VERSION" >> "/tmp/$YML_FILE"
             fi
-            gh release upload "$TAG" --repo "$REPO" "/tmp/$YML_FILE" --clobber
+            retry_cmd 5 3 gh release upload "$TAG" --repo "$REPO" "/tmp/$YML_FILE" --clobber
           done
 
   release-linux:
@@ -84,7 +89,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
       - name: Install Dependencies
         run: npm install
 
@@ -117,13 +121,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           TAG=${GITHUB_REF_NAME}
           REPO=${{ github.repository }}
           MINIMUM_VERSION="4.1.7"
-          gh release download "$TAG" --repo "$REPO" --pattern "latest-linux.yml" --output "/tmp/latest-linux.yml" 2>/dev/null || true
+          wait_for_release_id "$REPO" "$TAG" 12 2 >/dev/null
+          retry_cmd 5 3 gh release download "$TAG" --repo "$REPO" --pattern "latest-linux.yml" --output "/tmp/latest-linux.yml" || true
           if [ -f /tmp/latest-linux.yml ] && ! grep -q 'minimumVersion' /tmp/latest-linux.yml; then
             echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest-linux.yml
-            gh release upload "$TAG" --repo "$REPO" /tmp/latest-linux.yml --clobber
+            retry_cmd 5 3 gh release upload "$TAG" --repo "$REPO" /tmp/latest-linux.yml --clobber
           fi
 
   release:
@@ -140,7 +147,6 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-
       - name: Install Dependencies
         run: npm install
 
@@ -168,13 +174,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           TAG=${GITHUB_REF_NAME}
           REPO=${{ github.repository }}
           MINIMUM_VERSION="4.1.7"
-          gh release download "$TAG" --repo "$REPO" --pattern "latest.yml" --output "/tmp/latest.yml" 2>/dev/null || true
+          wait_for_release_id "$REPO" "$TAG" 12 2 >/dev/null
+          retry_cmd 5 3 gh release download "$TAG" --repo "$REPO" --pattern "latest.yml" --output "/tmp/latest.yml" || true
           if [ -f /tmp/latest.yml ] && ! grep -q 'minimumVersion' /tmp/latest.yml; then
             echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest.yml
-            gh release upload "$TAG" --repo "$REPO" /tmp/latest.yml --clobber
+            retry_cmd 5 3 gh release upload "$TAG" --repo "$REPO" /tmp/latest.yml --clobber
           fi
 
   release-windows-arm64:
@@ -191,7 +200,6 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-
       - name: Install Dependencies
         run: npm install
 
@@ -219,13 +227,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          set -euo pipefail
+          source .github/scripts/release-utils.sh
           TAG=${GITHUB_REF_NAME}
           REPO=${{ github.repository }}
           MINIMUM_VERSION="4.1.7"
-          gh release download "$TAG" --repo "$REPO" --pattern "latest-arm64.yml" --output "/tmp/latest-arm64.yml" 2>/dev/null || true
+          wait_for_release_id "$REPO" "$TAG" 12 2 >/dev/null
+          retry_cmd 5 3 gh release download "$TAG" --repo "$REPO" --pattern "latest-arm64.yml" --output "/tmp/latest-arm64.yml" || true
           if [ -f /tmp/latest-arm64.yml ] && ! grep -q 'minimumVersion' /tmp/latest-arm64.yml; then
             echo "minimumVersion: $MINIMUM_VERSION" >> /tmp/latest-arm64.yml
-            gh release upload "$TAG" --repo "$REPO" /tmp/latest-arm64.yml --clobber
+            retry_cmd 5 3 gh release upload "$TAG" --repo "$REPO" /tmp/latest-arm64.yml --clobber
           fi
 
   update-release-notes:
@@ -243,12 +254,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source .github/scripts/release-utils.sh
 
           TAG="$GITHUB_REF_NAME"
           REPO="$GITHUB_REPOSITORY"
           RELEASE_PAGE="https://github.com/$REPO/releases/tag/$TAG"
+          wait_for_release_id "$REPO" "$TAG" 12 2 >/dev/null
 
-          ASSETS_JSON="$(gh release view "$TAG" --repo "$REPO" --json assets)"
+          capture_cmd_with_retry ASSETS_JSON 8 3 gh release view "$TAG" --repo "$REPO" --json assets
 
           pick_asset() {
             local pattern="$1"
@@ -299,7 +312,7 @@ jobs:
           > 如果某个平台链接暂时未生成，可进入[完整发布页]($RELEASE_PAGE)查看全部资源
           EOF
 
-          gh release edit "$TAG" --repo "$REPO" --notes-file release_notes.md
+          retry_cmd 5 3 gh release edit "$TAG" --repo "$REPO" --notes-file release_notes.md
 
   deploy-aur:
       runs-on: ubuntu-latest

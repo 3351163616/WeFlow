@@ -3043,6 +3043,30 @@
     gap: 10px;
   }
 
+  .table-name-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    margin-bottom: 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--card-bg) 90%, transparent);
+    font-size: 12px;
+
+    .table-name-label {
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+
+    .table-name-value {
+      color: var(--text-primary);
+      font-weight: 500;
+      word-break: break-all;
+      user-select: text;
+    }
+  }
+
   .detail-table-placeholder {
     padding: 11px 12px;
     background: color-mix(in srgb, var(--card-bg) 84%, transparent);
@@ -3056,6 +3080,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
     padding: 10px 12px;
     background: color-mix(in srgb, var(--card-bg) 90%, transparent);
     border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
@@ -3071,15 +3096,17 @@
     .db-name {
       color: var(--text-primary);
       font-weight: 500;
-      max-width: 62%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      line-height: 1.35;
+      word-break: break-all;
+      user-select: text;
+      flex: 1;
     }
 
     .table-count {
       color: var(--primary);
       font-weight: 600;
+      flex-shrink: 0;
+      user-select: text;
     }
   }
 }

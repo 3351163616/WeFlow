@@ -1,4 +1,4 @@
-import './preload-env'
+﻿import './preload-env'
 import { app, BrowserWindow, ipcMain, nativeTheme, session, Tray, Menu, nativeImage } from 'electron'
 import { Worker } from 'worker_threads'
 import { randomUUID } from 'crypto'
@@ -31,6 +31,7 @@ import { destroyNotificationWindow, registerNotificationHandlers, showNotificati
 import { httpService } from './services/httpService'
 import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
+import { normalizeWeiboCookieInput, weiboService } from './services/social/weiboService'
 import { bizService } from './services/bizService'
 import { characterPromptService } from './services/characterPromptService'
 import { annualReportAiService } from './services/annualReportAiService'
@@ -376,6 +377,7 @@ if (process.platform === 'darwin') {
 let mainWindowReady = false
 let shouldShowMain = true
 let isAppQuitting = false
+let shutdownPromise: Promise<void> | null = null
 let tray: Tray | null = null
 let isClosePromptVisible = false
 const chatHistoryPayloadStore = new Map<string, { sessionId: string; title?: string; recordList: any[] }>()
@@ -1751,6 +1753,33 @@ function registerIpcHandlers() {
     return testAiConnection(config)
   })
 
+  // 社交上下文：微博 cookie / UID
+  ipcMain.handle('social:saveWeiboCookie', async (_, rawInput: string) => {
+    try {
+      if (!configService) {
+        return { success: false, error: 'Config service is not initialized' }
+      }
+      const normalized = normalizeWeiboCookieInput(rawInput)
+      configService.set('aiInsightWeiboCookie' as any, normalized as any)
+      weiboService.clearCache()
+      return { success: true, normalized, hasCookie: Boolean(normalized) }
+    } catch (error) {
+      return { success: false, error: (error as Error).message || 'Failed to save Weibo cookie' }
+    }
+  })
+
+  ipcMain.handle('social:validateWeiboUid', async (_, uid: string) => {
+    try {
+      if (!configService) {
+        return { success: false, error: 'Config service is not initialized' }
+      }
+      const cookie = String(configService.get('aiInsightWeiboCookie' as any) || '')
+      return await weiboService.validateUid(uid, cookie)
+    } catch (error) {
+      return { success: false, error: (error as Error).message || 'Failed to validate Weibo UID' }
+    }
+  })
+
   ipcMain.handle('config:clear', async () => {
     if (isLaunchAtStartupSupported() && getSystemLaunchAtStartup()) {
       const result = setSystemLaunchAtStartup(false)
@@ -1954,9 +1983,17 @@ function registerIpcHandlers() {
         downloadedHandler = null
       }
       
-      // 统一错误提示格式，避免出现 [object Object] 的 JSON 字符串
-      const errorMessage = error.message || (typeof error === 'string' ? error : JSON.stringify(error))
-      throw new Error(errorMessage)
+      const errorCode = typeof error?.code === 'string' ? error.code : ''
+      const rawErrorMessage =
+        typeof error?.message === 'string'
+          ? error.message
+          : (typeof error === 'string' ? error : JSON.stringify(error))
+
+      if (errorCode === 'ERR_UPDATER_ZIP_FILE_NOT_FOUND' || /ZIP file not provided/i.test(rawErrorMessage)) {
+        throw new Error('当前发布版本缺少 macOS 自动更新所需的 ZIP 包，请联系开发者重新发布该版本')
+      }
+
+      throw new Error(rawErrorMessage || '下载更新失败，请稍后重试')
     }
   })
 
@@ -2727,15 +2764,30 @@ function registerIpcHandlers() {
   // 私聊克隆
 
 
-  ipcMain.handle('image:decrypt', async (_, payload: { sessionId?: string; imageMd5?: string; imageDatName?: string; force?: boolean }) => {
+  ipcMain.handle('image:decrypt', async (_, payload: {
+    sessionId?: string
+    imageMd5?: string
+    imageDatName?: string
+    createTime?: number
+    force?: boolean
+    preferFilePath?: boolean
+    hardlinkOnly?: boolean
+    disableUpdateCheck?: boolean
+    allowCacheIndex?: boolean
+    suppressEvents?: boolean
+  }) => {
     return imageDecryptService.decryptImage(payload)
   })
   ipcMain.handle('image:resolveCache', async (_, payload: {
     sessionId?: string
     imageMd5?: string
     imageDatName?: string
+    createTime?: number
+    preferFilePath?: boolean
+    hardlinkOnly?: boolean
     disableUpdateCheck?: boolean
     allowCacheIndex?: boolean
+    suppressEvents?: boolean
   }) => {
     return imageDecryptService.resolveCachedImage(payload)
   })
@@ -2743,17 +2795,84 @@ function registerIpcHandlers() {
     'image:resolveCacheBatch',
     async (
       _,
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
-      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean }
+      payloads: Array<{
+        sessionId?: string
+        imageMd5?: string
+        imageDatName?: string
+        createTime?: number
+        preferFilePath?: boolean
+        hardlinkOnly?: boolean
+        suppressEvents?: boolean
+      }>,
+      options?: { disableUpdateCheck?: boolean; allowCacheIndex?: boolean; preferFilePath?: boolean; hardlinkOnly?: boolean; suppressEvents?: boolean }
     ) => {
       const list = Array.isArray(payloads) ? payloads : []
-      const rows = await Promise.all(list.map(async (payload) => {
-        return imageDecryptService.resolveCachedImage({
-          ...payload,
-          disableUpdateCheck: options?.disableUpdateCheck === true,
-          allowCacheIndex: options?.allowCacheIndex !== false
-        })
-      }))
+      if (list.length === 0) return { success: true, rows: [] }
+
+      const maxConcurrentRaw = Number(process.env.WEFLOW_IMAGE_RESOLVE_BATCH_CONCURRENCY || 10)
+      const maxConcurrent = Number.isFinite(maxConcurrentRaw)
+        ? Math.max(1, Math.min(Math.floor(maxConcurrentRaw), 48))
+        : 10
+      const workerCount = Math.min(maxConcurrent, list.length)
+
+      const rows: Array<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }> = new Array(list.length)
+      let cursor = 0
+      const dedupe = new Map<string, Promise<{ success: boolean; localPath?: string; hasUpdate?: boolean; error?: string }>>()
+
+      const makeDedupeKey = (payload: typeof list[number]): string => {
+        const sessionId = String(payload.sessionId || '').trim().toLowerCase()
+        const imageMd5 = String(payload.imageMd5 || '').trim().toLowerCase()
+        const imageDatName = String(payload.imageDatName || '').trim().toLowerCase()
+        const createTime = Number(payload.createTime || 0) || 0
+        const preferFilePath = payload.preferFilePath ?? options?.preferFilePath === true
+        const hardlinkOnly = payload.hardlinkOnly ?? options?.hardlinkOnly === true
+        const allowCacheIndex = options?.allowCacheIndex !== false
+        const disableUpdateCheck = options?.disableUpdateCheck === true
+        const suppressEvents = payload.suppressEvents ?? options?.suppressEvents === true
+        return [
+          sessionId,
+          imageMd5,
+          imageDatName,
+          String(createTime),
+          preferFilePath ? 'pf1' : 'pf0',
+          hardlinkOnly ? 'hl1' : 'hl0',
+          allowCacheIndex ? 'ci1' : 'ci0',
+          disableUpdateCheck ? 'du1' : 'du0',
+          suppressEvents ? 'se1' : 'se0'
+        ].join('|')
+      }
+
+      const resolveOne = (payload: typeof list[number]) => imageDecryptService.resolveCachedImage({
+        ...payload,
+        preferFilePath: payload.preferFilePath ?? options?.preferFilePath === true,
+        hardlinkOnly: payload.hardlinkOnly ?? options?.hardlinkOnly === true,
+        disableUpdateCheck: options?.disableUpdateCheck === true,
+        allowCacheIndex: options?.allowCacheIndex !== false,
+        suppressEvents: payload.suppressEvents ?? options?.suppressEvents === true
+      })
+
+      const worker = async () => {
+        while (true) {
+          const index = cursor
+          cursor += 1
+          if (index >= list.length) return
+          const payload = list[index]
+          const key = makeDedupeKey(payload)
+          const existing = dedupe.get(key)
+          if (existing) {
+            rows[index] = await existing
+            continue
+          }
+          const task = resolveOne(payload).catch((error) => ({
+            success: false,
+            error: String(error)
+          }))
+          dedupe.set(key, task)
+          rows[index] = await task
+        }
+      }
+
+      await Promise.all(Array.from({ length: workerCount }, () => worker()))
       return { success: true, rows }
     }
   )
@@ -2761,12 +2880,19 @@ function registerIpcHandlers() {
     'image:preload',
     async (
       _,
-      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>,
+      payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }>,
       options?: { allowDecrypt?: boolean; allowCacheIndex?: boolean }
     ) => {
     imagePreloadService.enqueue(payloads || [], options)
     return true
   })
+  ipcMain.handle(
+    'image:preloadHardlinkMd5s',
+    async (_, md5List?: string[]) => {
+      await imageDecryptService.preloadImageHardlinkMd5s(Array.isArray(md5List) ? md5List : [])
+      return true
+    }
+  )
 
   // Windows Hello
   ipcMain.handle('auth:hello', async (event, message?: string) => {
@@ -3848,23 +3974,35 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', async () => {
-  isAppQuitting = true
-  // 销毁 tray 图标
-  if (tray) { try { tray.destroy() } catch {} tray = null }
-  // 通知窗使用 hide 而非 close，退出时主动销毁，避免残留窗口阻塞进程退出。
-  destroyNotificationWindow()
-  insightService.stop()
-  // 兜底：5秒后强制退出，防止某个异步任务卡住导致进程残留
-  const forceExitTimer = setTimeout(() => {
-    console.warn('[App] Force exit after timeout')
-    app.exit(0)
-  }, 5000)
-  forceExitTimer.unref()
-  // 停止 HTTP 服务器，释放 TCP 端口占用，避免进程无法退出
-  try { await httpService.stop() } catch {}
-  // 终止 wcdb Worker 线程，避免线程阻止进程退出
-  try { await wcdbService.shutdown() } catch {}
+const shutdownAppServices = async (): Promise<void> => {
+  if (shutdownPromise) return shutdownPromise
+  shutdownPromise = (async () => {
+    isAppQuitting = true
+    // 销毁 tray 图标
+    if (tray) { try { tray.destroy() } catch {} tray = null }
+    // 通知窗使用 hide 而非 close，退出时主动销毁，避免残留窗口阻塞进程退出。
+    destroyNotificationWindow()
+    messagePushService.stop()
+    insightService.stop()
+    // 兜底：5秒后强制退出，防止某个异步任务卡住导致进程残留
+    const forceExitTimer = setTimeout(() => {
+      console.warn('[App] Force exit after timeout')
+      app.exit(0)
+    }, 5000)
+    forceExitTimer.unref()
+    try { await cloudControlService.stop() } catch {}
+    // 停止 chatService（内部会关闭 cursor 与 DB），避免退出阶段仍触发监控回调
+    try { chatService.close() } catch {}
+    // 停止 HTTP 服务器，释放 TCP 端口占用，避免进程无法退出
+    try { await httpService.stop() } catch {}
+    // 终止 wcdb Worker 线程，避免线程阻止进程退出
+    try { await wcdbService.shutdown() } catch {}
+  })()
+  return shutdownPromise
+}
+
+app.on('before-quit', () => {
+  void shutdownAppServices()
 })
 
 app.on('window-all-closed', () => {
@@ -3872,3 +4010,7 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+
+
+
