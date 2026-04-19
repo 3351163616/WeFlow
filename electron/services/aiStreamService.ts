@@ -119,9 +119,17 @@ class SSEParser {
   }
 }
 
+export interface AiTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface CallAiOptions {
   config: AiConfig
-  prompt: string
+  /** 单轮提示词；与 messages 二选一（messages 优先） */
+  prompt?: string
+  /** 多轮对话数组（不含 system 角色；system 走 systemPrompt）。传入后覆盖 prompt */
+  messages?: AiTurn[]
   systemPrompt?: string
   maxTokens?: number
   /** 采样温度，默认由 provider 决定（OpenAI 默认 1.0）；观察型/对比型任务建议 0.4–0.7 */
@@ -135,10 +143,20 @@ export interface CallAiOptions {
  * 同时兼容 OpenAI/Anthropic 两种协议，SSE + 非流式 JSON 自动回退
  */
 export function callAiStream(opts: CallAiOptions): Promise<void> {
-  const { config, prompt, systemPrompt, maxTokens = 16384, temperature, onChunk, signal } = opts
+  const { config, prompt, messages, systemPrompt, maxTokens = 16384, temperature, onChunk, signal } = opts
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('已取消'))
+      return
+    }
+
+    // 归一化多轮消息：messages 优先，否则 fallback 到单条 user prompt
+    const turns: AiTurn[] = (messages && messages.length > 0)
+      ? messages
+      : [{ role: 'user', content: String(prompt || '') }]
+
+    if (!turns.some(t => t.content)) {
+      reject(new Error('callAiStream：prompt 与 messages 均为空'))
       return
     }
 
@@ -152,7 +170,7 @@ export function callAiStream(opts: CallAiOptions): Promise<void> {
         model: config.model,
         max_tokens: maxTokens,
         stream: true,
-        messages: [{ role: 'user', content: prompt }]
+        messages: turns.map(t => ({ role: t.role, content: t.content }))
       }
       if (systemPrompt) anthropicBody.system = systemPrompt
       if (typeof temperature === 'number') anthropicBody.temperature = temperature
@@ -164,13 +182,13 @@ export function callAiStream(opts: CallAiOptions): Promise<void> {
       }
     } else {
       endpoint = buildAiApiUrl(config.apiBaseUrl, '/chat/completions')
-      const messages: Array<{ role: string; content: string }> = []
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt })
-      messages.push({ role: 'user', content: prompt })
+      const openaiMessages: Array<{ role: string; content: string }> = []
+      if (systemPrompt) openaiMessages.push({ role: 'system', content: systemPrompt })
+      for (const t of turns) openaiMessages.push({ role: t.role, content: t.content })
       const openaiBody: Record<string, unknown> = {
         model: config.model,
         stream: true,
-        messages
+        messages: openaiMessages
       }
       if (typeof temperature === 'number') openaiBody.temperature = temperature
       body = JSON.stringify(openaiBody)

@@ -34,6 +34,7 @@ import { insightService } from './services/insightService'
 import { normalizeWeiboCookieInput, weiboService } from './services/social/weiboService'
 import { bizService } from './services/bizService'
 import { characterPromptService } from './services/characterPromptService'
+import { characterChatService } from './services/characterChatService'
 import { annualReportAiService } from './services/annualReportAiService'
 import { analyticsAiService } from './services/analyticsAiService'
 import { testAiConnection } from './services/aiStreamService'
@@ -1721,6 +1722,38 @@ function registerIpcHandlers() {
   ipcMain.handle('characterPrompt:setExportDir', async (_, dir: string) => {
     ;(configService.set as (k: string, v: unknown) => void)('characterPromptExportDir', dir || '')
     return { success: true }
+  })
+
+  // 模拟微信角色聊天（里程碑 1：画像生成 + 查询）
+  ipcMain.handle('characterChat:hasProfile', async (_, contactId: string) => {
+    return characterChatService.hasProfile(contactId)
+  })
+  ipcMain.handle('characterChat:getProfile', async (_, contactId: string) => {
+    return characterChatService.getProfile(contactId)
+  })
+  ipcMain.handle('characterChat:listProfiles', async () => {
+    return characterChatService.listProfiles()
+  })
+  ipcMain.handle('characterChat:deleteProfile', async (_, contactId: string) => {
+    return characterChatService.deleteProfile(contactId)
+  })
+  ipcMain.handle('characterChat:generateProfile', async (_, params) => {
+    return characterChatService.generateProfile(params)
+  })
+  ipcMain.handle('characterChat:stopGenerate', async (_, taskId: string) => {
+    return characterChatService.stop(taskId)
+  })
+  ipcMain.handle('characterChat:ask', async (_, params) => {
+    return characterChatService.ask(params)
+  })
+  ipcMain.handle('characterChat:stopReply', async (_, contactId: string) => {
+    return characterChatService.stopReply(contactId)
+  })
+  ipcMain.handle('characterChat:loadMessages', async (_, contactId: string) => {
+    return characterChatService.loadMessages(contactId)
+  })
+  ipcMain.handle('characterChat:clearConversation', async (_, contactId: string) => {
+    return characterChatService.clearConversation(contactId)
   })
 
   // 年度报告 AI 叙事 / 标题
@@ -3809,6 +3842,7 @@ app.whenReady().then(async () => {
   updateSplashProgress(28, '正在初始化...')
   registerIpcHandlers()
   characterPromptService.setConfig(configService)
+  characterChatService.setConfig(configService)
   annualReportAiService.setConfig(configService)
   analyticsAiService.setConfig(configService)
   characterPromptRedeemService.setConfig(configService)

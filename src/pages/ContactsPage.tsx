@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type UIEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download, ChevronDown, MessageCircle, UserX, AlertTriangle, ClipboardList, Aperture } from 'lucide-react'
+import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download, ChevronDown, MessageCircle, UserX, AlertTriangle, ClipboardList, Aperture, Sparkles } from 'lucide-react'
 import { useChatStore } from '../stores/chatStore'
 import { toContactTypeCardCounts, useContactTypeCountsStore } from '../stores/contactTypeCountsStore'
 import * as configService from '../services/config'
@@ -1150,6 +1150,15 @@ function ContactsPage() {
                             <MessageCircle size={18} />
                             <span>查看聊天记录</span>
                         </button>
+                        {selectedContact.type === 'friend' && (
+                            <button
+                                className="goto-chat-ai-btn"
+                                onClick={() => navigate(`/character-chat/${encodeURIComponent(selectedContact.username)}`)}
+                            >
+                                <Sparkles size={16} />
+                                <span>与 TA AI 聊天（模拟对话）</span>
+                            </button>
+                        )}
                     </div>
                 </div>
             ) : (

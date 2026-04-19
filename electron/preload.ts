@@ -609,6 +609,82 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return () => ipcRenderer.removeAllListeners('characterPrompt:usesUpdated')
     }
   },
+  // 模拟微信角色聊天（里程碑 1：画像生成 + 查询）
+  characterChat: {
+    hasProfile: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:hasProfile', contactId),
+    getProfile: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:getProfile', contactId),
+    listProfiles: () =>
+      ipcRenderer.invoke('characterChat:listProfiles'),
+    deleteProfile: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:deleteProfile', contactId),
+    generateProfile: (params: {
+      contactId: string
+      sampleSize?: number
+      sessionGap?: number
+      apiProvider?: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => ipcRenderer.invoke('characterChat:generateProfile', params),
+    stopGenerate: (taskId: string) =>
+      ipcRenderer.invoke('characterChat:stopGenerate', taskId),
+    ask: (params: {
+      contactId: string
+      text: string
+      apiProvider?: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => ipcRenderer.invoke('characterChat:ask', params),
+    stopReply: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:stopReply', contactId),
+    loadMessages: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:loadMessages', contactId),
+    clearConversation: (contactId: string) =>
+      ipcRenderer.invoke('characterChat:clearConversation', contactId),
+    onProgress: (callback: (payload: {
+      taskId: string
+      phase: 'loading' | 'formatting' | 'generating' | 'saving' | 'done'
+      message: string
+      current?: number
+      total?: number
+      indeterminate?: boolean
+    }) => void) => {
+      ipcRenderer.on('characterChat:progress', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:progress')
+    },
+    onChunk: (callback: (payload: { taskId: string; contactId: string; chunk: string }) => void) => {
+      ipcRenderer.on('characterChat:chunk', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:chunk')
+    },
+    onComplete: (callback: (payload: { taskId: string; contactId: string; profile: unknown }) => void) => {
+      ipcRenderer.on('characterChat:complete', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:complete')
+    },
+    onError: (callback: (payload: { taskId: string; contactId?: string; error: string }) => void) => {
+      ipcRenderer.on('characterChat:error', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:error')
+    },
+    onReplyChunk: (callback: (payload: { contactId: string; chunk: string }) => void) => {
+      ipcRenderer.on('characterChat:replyChunk', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:replyChunk')
+    },
+    onReplyDone: (callback: (payload: {
+      contactId: string
+      assistantMessages: Array<{ id: string; role: 'assistant'; content: string; createdAt: number }>
+    }) => void) => {
+      ipcRenderer.on('characterChat:replyDone', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:replyDone')
+    },
+    onReplyError: (callback: (payload: { contactId: string; error: string }) => void) => {
+      ipcRenderer.on('characterChat:replyError', (_, payload) => callback(payload))
+      return () => ipcRenderer.removeAllListeners('characterChat:replyError')
+    }
+  },
   annualReportAi: {
     generateNarration: (params: unknown) =>
       ipcRenderer.invoke('annualReportAi:generateNarration', params),

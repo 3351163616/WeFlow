@@ -578,6 +578,28 @@
     &:hover { background: var(--primary-hover); }
   }
 
+  .goto-chat-ai-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 12px;
+    margin-top: 8px;
+    background: transparent;
+    color: var(--primary);
+    border: 1px solid var(--primary);
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+
+    &:hover {
+      background: color-mix(in srgb, var(--primary) 8%, transparent);
+    }
+  }
+
   .empty-detail {
     flex: 1;
     display: flex;

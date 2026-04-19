@@ -17,6 +17,7 @@ import AgreementPage from './pages/AgreementPage'
 import GroupAnalyticsPage from './pages/GroupAnalyticsPage'
 import AnalyticsStyleContrastPage from './pages/AnalyticsStyleContrastPage'
 import { initCharacterPromptListeners } from './stores/characterPromptStore'
+import { initCharacterChatListeners } from './stores/characterChatStore'
 import SettingsPage from './pages/SettingsPage'
 import ExportPage from './pages/ExportPage'
 import MyFootprintPage from './pages/MyFootprintPage'
@@ -30,6 +31,7 @@ import ChatHistoryPage from './pages/ChatHistoryPage'
 import NotificationWindow from './pages/NotificationWindow'
 import AccountManagementPage from './pages/AccountManagementPage'
 import CharacterPromptPage from './pages/CharacterPromptPage'
+import CharacterChatPage from './pages/CharacterChatPage'
 
 import { useAppStore } from './stores/appStore'
 import { themes, useThemeStore, type ThemeId, type ThemeMode } from './stores/themeStore'
@@ -119,6 +121,7 @@ function App() {
   // 全局一次性：注册角色提示词 IPC 监听器，保证切换路由不会丢失流式任务
   useEffect(() => {
     initCharacterPromptListeners()
+    initCharacterChatListeners()
   }, [])
 
   useEffect(() => {
@@ -696,6 +699,8 @@ function App() {
               <Route path="/dual-report" element={<DualReportPage />} />
               <Route path="/dual-report/view" element={<DualReportWindow />} />
               <Route path="/character-prompt" element={<CharacterPromptPage />} />
+              <Route path="/character-chat" element={<CharacterChatPage />} />
+              <Route path="/character-chat/:contactId" element={<CharacterChatPage />} />
               <Route path="/footprint" element={<MyFootprintPage />} />
 
               <Route path="/export" element={<div className="export-route-anchor" aria-hidden="true" />} />

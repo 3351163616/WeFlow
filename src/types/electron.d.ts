@@ -1165,6 +1165,90 @@ export interface ElectronAPI {
     onError: (callback: (payload: { taskId: string; targetName?: string; error: string }) => void) => () => void
     onUsesUpdated: (callback: (payload: { taskId: string; remaining: number }) => void) => () => void
   }
+  characterChat: {
+    hasProfile: (contactId: string) => Promise<{ exists: boolean; generatedAt?: number; version?: number }>
+    getProfile: (contactId: string) => Promise<{
+      success: boolean
+      profile?: {
+        contactId: string
+        displayName: string
+        selfDisplayName: string
+        profileMarkdown: string
+        sourceMessageCount: number
+        sampleSize: number
+        messageCountUsed: number
+        timeRangeStart: number
+        timeRangeEnd: number
+        generatedAt: number
+        model: string
+        provider: 'openai' | 'anthropic'
+        version: number
+      }
+      error?: string
+    }>
+    listProfiles: () => Promise<{
+      success: boolean
+      profiles?: Array<{
+        contactId: string
+        displayName: string
+        sourceMessageCount: number
+        messageCountUsed: number
+        generatedAt: number
+        model: string
+        version: number
+      }>
+      error?: string
+    }>
+    deleteProfile: (contactId: string) => Promise<{ success: boolean; error?: string }>
+    generateProfile: (params: {
+      contactId: string
+      sampleSize?: number
+      sessionGap?: number
+      apiProvider?: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => Promise<{ success: boolean; taskId?: string; error?: string }>
+    stopGenerate: (taskId: string) => Promise<{ success: boolean }>
+    ask: (params: {
+      contactId: string
+      text: string
+      apiProvider?: 'openai' | 'anthropic'
+      apiBaseUrl?: string
+      apiKey?: string
+      apiModel?: string
+      useBuiltinApi?: boolean
+    }) => Promise<{
+      success: boolean
+      userMessage?: { id: string; role: 'user'; content: string; createdAt: number }
+      error?: string
+    }>
+    stopReply: (contactId: string) => Promise<{ success: boolean }>
+    loadMessages: (contactId: string) => Promise<{
+      success: boolean
+      messages?: Array<{ id: string; role: 'user' | 'assistant'; content: string; createdAt: number }>
+      error?: string
+    }>
+    clearConversation: (contactId: string) => Promise<{ success: boolean; error?: string }>
+    onProgress: (callback: (payload: {
+      taskId: string
+      phase: 'loading' | 'formatting' | 'generating' | 'saving' | 'done'
+      message: string
+      current?: number
+      total?: number
+      indeterminate?: boolean
+    }) => void) => () => void
+    onChunk: (callback: (payload: { taskId: string; contactId: string; chunk: string }) => void) => () => void
+    onComplete: (callback: (payload: { taskId: string; contactId: string; profile: unknown }) => void) => () => void
+    onError: (callback: (payload: { taskId: string; contactId?: string; error: string }) => void) => () => void
+    onReplyChunk: (callback: (payload: { contactId: string; chunk: string }) => void) => () => void
+    onReplyDone: (callback: (payload: {
+      contactId: string
+      assistantMessages: Array<{ id: string; role: 'assistant'; content: string; createdAt: number }>
+    }) => void) => () => void
+    onReplyError: (callback: (payload: { contactId: string; error: string }) => void) => () => void
+  }
   annualReportAi: {
     generateNarration: (params: {
       reportData: unknown
