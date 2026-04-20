@@ -411,35 +411,58 @@ class CharacterChatService {
     }
 
     const effectiveSample = Math.min(sampleSize, totalCount)
-    const startOffset = Math.max(0, totalCount - effectiveSample)
 
+    // 时间分层采样：把总消息按 offset 平均切 3 段（早期/中期/近期），每段取尾部 1/3 sample
+    // 目的：捕获联系人风格在时间上的演变，避免画像只学到近期（尤其对多年老友场景关键）
+    // 当 totalCount <= effectiveSample 时直接全量，无需分层
+    const segments: Array<{ start: number; take: number }> = []
+    if (totalCount <= effectiveSample) {
+      segments.push({ start: 0, take: totalCount })
+    } else {
+      const segSize = Math.floor(totalCount / 3)
+      const perSeg = Math.floor(effectiveSample / 3)
+      for (let i = 0; i < 3; i++) {
+        const segStart = i * segSize
+        const segEnd = i === 2 ? totalCount : (i + 1) * segSize
+        const targetTake = i === 2 ? effectiveSample - perSeg * 2 : perSeg
+        const start = Math.max(segStart, segEnd - targetTake)
+        segments.push({ start, take: segEnd - start })
+      }
+    }
+
+    const totalPlanned = segments.reduce((s, x) => s + x.take, 0)
     this.sendProgress({
       taskId, phase: 'loading',
-      message: `正在读取最近 ${effectiveSample} 条消息（共 ${totalCount} 条）…`,
-      current: 0, total: effectiveSample
+      message: totalCount <= effectiveSample
+        ? `读取全部 ${totalCount} 条消息…`
+        : `时间分层采样：读取约 ${totalPlanned} 条消息（共 ${totalCount} 条，跨 3 个时期）…`,
+      current: 0, total: totalPlanned
     })
 
-    // 2. 批量读消息（正序，从 startOffset 开始，对应"倒序截取最近 N 条"的结果）
+    // 2. 批量读消息（分段正序）
     const messages: Message[] = []
-    let offset = startOffset
-    while (offset < totalCount) {
-      if (signal.aborted) throw new Error('已取消')
-      const remaining = totalCount - offset
-      const take = Math.min(MESSAGE_BATCH_SIZE, remaining)
-      const r = await chatService.getMessages(contactId, offset, take, 0, 0, true)
-      if (!r?.success || !r.messages?.length) break
-      messages.push(...r.messages)
-      offset += r.messages.length
-      this.sendProgress({
-        taskId, phase: 'loading',
-        message: `读取消息中 ${messages.length}/${effectiveSample}…`,
-        current: messages.length, total: effectiveSample
-      })
-      if (r.messages.length < take) break
+    for (const seg of segments) {
+      let offset = seg.start
+      const segEnd = seg.start + seg.take
+      while (offset < segEnd) {
+        if (signal.aborted) throw new Error('已取消')
+        const remaining = segEnd - offset
+        const take = Math.min(MESSAGE_BATCH_SIZE, remaining)
+        const r = await chatService.getMessages(contactId, offset, take, 0, 0, true)
+        if (!r?.success || !r.messages?.length) break
+        messages.push(...r.messages)
+        offset += r.messages.length
+        this.sendProgress({
+          taskId, phase: 'loading',
+          message: `读取消息中 ${messages.length}/${totalPlanned}…`,
+          current: messages.length, total: totalPlanned
+        })
+        if (r.messages.length < take) break
+      }
     }
 
     if (messages.length === 0) throw new Error('未能读取到任何消息')
-    // 保险：再按 createTime 正序一次
+    // 保险：再按 createTime 正序一次（跨段后序列混杂，需要统一排序）
     messages.sort((a, b) => (a.createTime || 0) - (b.createTime || 0))
 
     // 3. 格式化
