@@ -238,7 +238,7 @@ function buildCharacterProfilePrompt(
 // ─── 对话提示词 ─────────────────────────────────────────────────────────────
 
 /** 将召回的 snippet 列表拼成给 AI 的 "相关历史片段" 段 */
-function formatRetrievedSnippets(snippets: RetrievedSnippet[]): string {
+function formatRetrievedSnippets(snippets: RetrievedSnippet[], withHeading = true): string {
   if (!snippets.length) return ''
   const lines: string[] = []
   for (let i = 0; i < snippets.length; i++) {
@@ -247,15 +247,22 @@ function formatRetrievedSnippets(snippets: RetrievedSnippet[]): string {
     const yy = dt.getFullYear()
     const MM = String(dt.getMonth() + 1).padStart(2, '0')
     const dd = String(dt.getDate()).padStart(2, '0')
-    lines.push(`【片段 ${i + 1}｜${yy}-${MM}-${dd}】\n${s.text}`)
+    const heading = withHeading ? `【片段 ${i + 1}｜${yy}-${MM}-${dd}】\n` : `（${yy}-${MM}-${dd}）\n`
+    lines.push(`${heading}${s.text}`)
   }
   return lines.join('\n\n')
 }
 
+/** 从 RAG 召回中挑 N 条作为 few-shot 样例（默认 2 条，分数最高） */
+const FEW_SHOT_COUNT = 2
+
 /**
  * 对话 system prompt 组装
  * 目标：让 AI "成为" 该联系人本人，而不是 "扮演" —— 从用词到标点都尽量保留
- * 可选追加 retrievedSnippets（RAG）以保留稀有表达与事实细节
+ *
+ * RAG 召回分两用：
+ *  - 前 FEW_SHOT_COUNT 条作为 "原人真实对话样例"（few-shot，语感对标）
+ *  - 剩余作为 "本轮相关历史片段"（事实与话题召回，不复述）
  */
 function buildConversationSystemPrompt(
   profile: CharacterProfile,
@@ -264,12 +271,30 @@ function buildConversationSystemPrompt(
   const { displayName, selfDisplayName, profileMarkdown } = profile
   const self = selfDisplayName || '朋友'
 
-  const snippetsBlock = retrievedSnippets.length > 0
-    ? `
+  let snippetsBlock = ''
+  if (retrievedSnippets.length > 0) {
+    const fewShotCount = Math.min(FEW_SHOT_COUNT, retrievedSnippets.length)
+    const fewShots = retrievedSnippets.slice(0, fewShotCount)
+    const contextSnippets = retrievedSnippets.slice(fewShotCount)
 
-=== 本轮相关历史片段（从你和对方的真实聊天里召回，仅供参考语感和事实，不要大段原样复述） ===
-${formatRetrievedSnippets(retrievedSnippets)}`
-    : ''
+    const fewShotBlock = `
+
+=== 原人真实对话样例（few-shot · 高优先级，请严格对标这个语感写回复）===
+以下是从你（${displayName}）与对方（${self}）的真实聊天记录里摘录的几段对话。
+每段中 A 代表对方、B 代表你本人。请仔细感受 B（你本人）的用词、句长、标点、emoji、错别字、语气词，
+生成回复时的语感必须与这些样例高度一致——**这比任何人设描述都重要**。
+
+${formatRetrievedSnippets(fewShots, false)}`
+
+    const contextBlock = contextSnippets.length > 0
+      ? `
+
+=== 本轮相关历史片段（仅供参考事实与话题，不要整段原样复述）===
+${formatRetrievedSnippets(contextSnippets, true)}`
+      : ''
+
+    snippetsBlock = fewShotBlock + contextBlock
+  }
 
   return `你就是「${displayName}」。你不是在扮演、不是在模仿——你就是本人。
 当前你在微信上和朋友（${self}）继续此前的聊天。
@@ -292,7 +317,8 @@ ${profileMarkdown}${snippetsBlock}
 8. 不要加前言、总结、标签、自我介绍、解释。直接说话。
 9. 如果对方的话让你意外、开心、无语、生气、尴尬——请用你自己的方式反应，不要中性化、不要温情化。
 10. 对方连发多条时把它们当作整体理解，然后用你自己的节奏回复。
-11. 相关历史片段仅供参考语感与事实，绝对不要整段原样引用或复述；可以自然引用其中曾经出现过的口头禅、梗、关键事件。
+11. "相关历史片段"仅供参考事实与话题，绝对不要整段原样引用或复述；可以自然引用其中曾经出现过的口头禅、梗、关键事件。
+12. "原人真实对话样例"是语感对标基准——你写出来的每句话、每个标点、每个 emoji，都应该让人相信这是同一个人写的。
 
 请用 ${displayName} 本人的方式，直接说话。`
 }
