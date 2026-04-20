@@ -87,6 +87,11 @@ const PROFILE_VERSION = 1
 
 /** 单轮对话回复上限（token），与 characterPrompt 对齐 */
 const REPLY_MAX_TOKENS = 16384
+/**
+ * 对话采样温度：0.7 在"保持风格一致"与"避免单调机械"之间平衡
+ * 过高（≥1.0）AI 易发散、出现 AI 腔；过低（≤0.4）回复偏模板化
+ */
+const REPLY_TEMPERATURE = 0.7
 /** 对话历史窗口（条，不含本轮用户输入） */
 const CONVERSATION_WINDOW = 30
 /** 软分条标记，AI 可用它把一轮回复拆成多条短消息 */
@@ -731,6 +736,7 @@ class CharacterChatService {
       systemPrompt,
       messages: turns,
       maxTokens: REPLY_MAX_TOKENS,
+      temperature: REPLY_TEMPERATURE,
       signal,
       onChunk: (chunk) => {
         fullText += chunk
