@@ -11,8 +11,11 @@ const handleElectronOnStart = (options: { reload: () => void }) => {
 export default defineConfig({
   base: './',
   server: {
-    port: 3000,
-    strictPort: false  // 如果3000被占用，自动尝试下一个
+    // Windows 上 Hyper-V/WSL 动态端口保留区（netsh int ipv4 show excludedportrange）
+    // 实际占用了 5142-5241、5387-5586 等多段，触发 EACCES。
+    // 5300 落在 5242-5356 的间隙中央，缓冲充足。
+    port: 5300,
+    strictPort: false
   },
   build: {
     chunkSizeWarningLimit: 900,
