@@ -103,8 +103,10 @@ class AnalyticsService {
     if (username === 'filehelper') return false
     if (username.startsWith('gh_')) return false
 
+    if (username.toLowerCase() === 'weixin') return false
+
     const excludeList = [
-      'weixin', 'qqmail', 'fmessage', 'medianote', 'floatbottle',
+      'qqmail', 'fmessage', 'medianote', 'floatbottle',
       'newsapp', 'brandsessionholder', 'brandservicesessionholder',
       'notifymessage', 'opencustomerservicemsg', 'notification_messages',
       'userexperience_alarm', 'helper_folders', 'placeholder_foldgroup',

@@ -79,6 +79,9 @@ const MESSAGE_TYPE_MAP: Record<number, number> = {
   34: 2,     // 语音 -> VOICE
   43: 3,     // 视频 -> VIDEO
   49: 7,     // 链接/文件 -> LINK (需要进一步判断)
+  34359738417: 7,  // 文件消息变体 -> LINK
+  103079215153: 7, // 文件消息变体 -> LINK
+  25769803825: 7,  // 文件消息变体 -> LINK
   47: 5,     // 表情包 -> EMOJI
   48: 8,     // 位置 -> LOCATION
   42: 27,    // 名片 -> CONTACT
@@ -86,9 +89,13 @@ const MESSAGE_TYPE_MAP: Record<number, number> = {
   10000: 80, // 系统消息 -> SYSTEM
 }
 
+// 与 chatService 的资源消息识别保持一致，覆盖桌面微信里的多种文件消息 localType。
+const FILE_APP_LOCAL_TYPES = [49, 34359738417, 103079215153, 25769803825] as const
+const FILE_APP_LOCAL_TYPE_SET = new Set<number>(FILE_APP_LOCAL_TYPES)
+
 export interface ExportOptions {
   format: 'chatlab' | 'chatlab-jsonl' | 'json' | 'arkme-json' | 'html' | 'txt' | 'excel' | 'weclone' | 'sql'
-  contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji'
+  contentType?: 'text' | 'voice' | 'image' | 'video' | 'emoji' | 'file'
   dateRange?: { start: number; end: number } | null
   senderUsername?: string
   fileNameSuffix?: string
@@ -137,11 +144,19 @@ interface ExportDisplayProfile {
 }
 
 type MessageCollectMode = 'full' | 'text-fast' | 'media-fast'
-type MediaContentType = 'voice' | 'image' | 'video' | 'emoji'
+type MediaContentType = 'voice' | 'image' | 'video' | 'emoji' | 'file'
 interface FileExportCandidate {
   sourcePath: string
   matchedBy: 'md5' | 'name'
   yearMonth?: string
+  preferredMonth?: boolean
+  mtimeMs: number
+  searchOrder: number
+}
+interface FileAttachmentSearchRoot {
+  accountDir: string
+  msgFileRoot?: string
+  fileStorageRoot?: string
 }
 
 export interface ExportProgress {
@@ -306,10 +321,35 @@ class ExportService {
     )
   }
 
+  private normalizeTimestampSeconds(value: unknown): number {
+    const raw = Number(value)
+    if (!Number.isFinite(raw) || raw <= 0) return 0
+    let normalized = Math.floor(raw)
+    // 兼容毫秒/微秒/纳秒时间戳输入，统一降到秒级。
+    while (normalized > 10000000000) {
+      normalized = Math.floor(normalized / 1000)
+    }
+    return normalized
+  }
+
+  private normalizeExportDateRange(dateRange?: { start: number; end: number } | null): { start: number; end: number } | null {
+    if (!dateRange) return null
+    let start = this.normalizeTimestampSeconds(dateRange.start)
+    let end = this.normalizeTimestampSeconds(dateRange.end)
+    if (start > 0 && end > 0 && start > end) {
+      const tmp = start
+      start = end
+      end = tmp
+    }
+    if (start <= 0 && end <= 0) return null
+    return { start, end }
+  }
+
   private getExportStatsDateRangeToken(dateRange?: { start: number; end: number } | null): string {
-    if (!dateRange) return 'all'
-    const start = Number.isFinite(dateRange.start) ? Math.max(0, Math.floor(dateRange.start)) : 0
-    const end = Number.isFinite(dateRange.end) ? Math.max(0, Math.floor(dateRange.end)) : 0
+    const normalized = this.normalizeExportDateRange(dateRange)
+    if (!normalized) return 'all'
+    const start = normalized.start
+    const end = normalized.end
     return `${start}-${end}`
   }
 
@@ -501,13 +541,21 @@ class ExportService {
       .trim()
   }
 
+  private resolveFileAttachmentExtensionDir(msg: any, fileName: string): string {
+    const rawExt = String(msg?.fileExt || '').trim() || path.extname(String(fileName || ''))
+    const normalizedExt = rawExt.replace(/^\.+/, '').trim().toLowerCase()
+    const safeExt = this.sanitizeExportFileNamePart(normalizedExt).replace(/\s+/g, '_')
+    return safeExt || 'no-extension'
+  }
+
   private normalizeFileNamingMode(value: unknown): 'classic' | 'date-range' {
     return String(value || '').trim().toLowerCase() === 'date-range' ? 'date-range' : 'classic'
   }
 
   private formatDateTokenBySeconds(seconds?: number): string | null {
-    if (!Number.isFinite(seconds) || (seconds || 0) <= 0) return null
-    const date = new Date(Math.floor(Number(seconds)) * 1000)
+    const normalizedSeconds = this.normalizeTimestampSeconds(seconds)
+    if (normalizedSeconds <= 0) return null
+    const date = new Date(normalizedSeconds * 1000)
     if (Number.isNaN(date.getTime())) return null
     const y = date.getFullYear()
     const m = `${date.getMonth() + 1}`.padStart(2, '0')
@@ -934,10 +982,7 @@ class ExportService {
   }
 
   private isUnboundedDateRange(dateRange?: { start: number; end: number } | null): boolean {
-    if (!dateRange) return true
-    const start = Number.isFinite(dateRange.start) ? dateRange.start : 0
-    const end = Number.isFinite(dateRange.end) ? dateRange.end : 0
-    return start <= 0 && end <= 0
+    return this.normalizeExportDateRange(dateRange) === null
   }
 
   private shouldUseFastTextCollection(options: ExportOptions): boolean {
@@ -947,7 +992,7 @@ class ExportService {
 
   private getMediaContentType(options: ExportOptions): MediaContentType | null {
     const value = options.contentType
-    if (value === 'voice' || value === 'image' || value === 'video' || value === 'emoji') {
+    if (value === 'voice' || value === 'image' || value === 'video' || value === 'emoji' || value === 'file') {
       return value
     }
     return null
@@ -963,13 +1008,115 @@ class ExportService {
     if (mediaContentType === 'image') return new Set([3])
     if (mediaContentType === 'video') return new Set([43])
     if (mediaContentType === 'emoji') return new Set([47])
+    if (mediaContentType === 'file') return new Set(FILE_APP_LOCAL_TYPES)
 
     const selected = new Set<number>()
     if (options.exportImages) selected.add(3)
     if (options.exportVoices) selected.add(34)
     if (options.exportVideos) selected.add(43)
-    if (options.exportFiles) selected.add(49)
+    if (options.exportFiles) {
+      for (const fileType of FILE_APP_LOCAL_TYPES) {
+        selected.add(fileType)
+      }
+    }
     return selected
+  }
+
+  private isFileAppLocalType(localType: number): boolean {
+    return FILE_APP_LOCAL_TYPE_SET.has(localType)
+  }
+
+  private isFileOnlyMediaFilter(targetMediaTypes: Set<number> | null): boolean {
+    return Boolean(
+      targetMediaTypes &&
+      targetMediaTypes.size === FILE_APP_LOCAL_TYPES.length &&
+      FILE_APP_LOCAL_TYPES.every((fileType) => targetMediaTypes.has(fileType))
+    )
+  }
+
+  private getFileAppMessageHints(message: Record<string, any> | null | undefined): {
+    xmlType?: string
+    fileName?: string
+    fileSize?: number
+    fileExt?: string
+    fileMd5?: string
+  } {
+    const xmlType = String(message?.xmlType ?? message?.xml_type ?? '').trim() || undefined
+    const fileName = String(message?.fileName ?? message?.file_name ?? '').trim() || undefined
+    const fileExt = String(message?.fileExt ?? message?.file_ext ?? '').trim() || undefined
+    const fileSizeRaw = Number(message?.fileSize ?? message?.file_size ?? message?.total_len ?? message?.totalLen ?? message?.totallen ?? 0)
+    const fileSize = Number.isFinite(fileSizeRaw) && fileSizeRaw > 0 ? Math.floor(fileSizeRaw) : undefined
+    const fileMd5Raw = String(message?.fileMd5 ?? message?.file_md5 ?? '').trim()
+    const fileMd5 = /^[a-f0-9]{32}$/i.test(fileMd5Raw) ? fileMd5Raw.toLowerCase() : undefined
+    return { xmlType, fileName, fileSize, fileExt, fileMd5 }
+  }
+
+  private hasFileAppMessageHints(message: Record<string, any> | null | undefined): boolean {
+    const hints = this.getFileAppMessageHints(message)
+    if (hints.xmlType) return hints.xmlType === '6'
+    return Boolean(hints.fileName || hints.fileExt || hints.fileMd5 || hints.fileSize)
+  }
+
+  private isFileAppMessage(msg: {
+    localType?: unknown
+    xmlType?: unknown
+    xml_type?: unknown
+    content?: unknown
+    fileName?: unknown
+    file_name?: unknown
+    fileSize?: unknown
+    file_size?: unknown
+    fileExt?: unknown
+    file_ext?: unknown
+    fileMd5?: unknown
+    file_md5?: unknown
+  }): boolean {
+    const { xmlType, fileName, fileExt, fileMd5, fileSize } = this.getFileAppMessageHints(msg as Record<string, any>)
+    if (xmlType) return xmlType === '6'
+    if (fileName || fileExt || fileMd5 || fileSize) return true
+
+    const normalized = this.normalizeAppMessageContent(String(msg?.content || ''))
+    if (!normalized || (!normalized.includes('<appmsg') && !normalized.includes('<msg>'))) {
+      return false
+    }
+    return this.extractAppMessageType(normalized) === '6'
+  }
+
+  private extractFileAppMessageMeta(content: string): {
+    xmlType?: string
+    fileName?: string
+    fileSize?: number
+    fileExt?: string
+    fileMd5?: string
+  } | null {
+    const normalized = this.normalizeAppMessageContent(content || '')
+    if (!normalized || (!normalized.includes('<appmsg') && !normalized.includes('<msg>'))) {
+      return null
+    }
+
+    const xmlType = this.extractAppMessageType(normalized)
+    if (!xmlType) return null
+
+    const rawFileName = this.extractXmlValue(normalized, 'filename') || this.extractXmlValue(normalized, 'title')
+    const rawFileExt = this.extractXmlValue(normalized, 'fileext')
+    const rawFileSize =
+      this.extractXmlValue(normalized, 'totallen') ||
+      this.extractXmlValue(normalized, 'datasize') ||
+      this.extractXmlValue(normalized, 'filesize')
+    const rawFileMd5 =
+      this.extractXmlValue(normalized, 'md5') ||
+      this.extractXmlAttribute(normalized, 'appattach', 'md5') ||
+      this.extractLooseHexMd5(normalized)
+    const fileSize = Number.parseInt(rawFileSize, 10)
+    const fileMd5 = String(rawFileMd5 || '').trim()
+
+    return {
+      xmlType,
+      fileName: this.decodeHtmlEntities(rawFileName).trim() || undefined,
+      fileSize: Number.isFinite(fileSize) && fileSize > 0 ? fileSize : undefined,
+      fileExt: this.decodeHtmlEntities(rawFileExt).trim() || undefined,
+      fileMd5: /^[a-f0-9]{32}$/i.test(fileMd5) ? fileMd5.toLowerCase() : undefined
+    }
   }
 
   private resolveCollectMode(options: ExportOptions): MessageCollectMode {
@@ -988,6 +1135,135 @@ class ExportService {
       }
     }
     return { mode }
+  }
+
+  private resolveFastMediaStreamType(
+    collectMode: MessageCollectMode,
+    targetMediaTypes: Set<number> | null
+  ): 'image' | 'video' | null {
+    if (collectMode !== 'media-fast' || !targetMediaTypes || targetMediaTypes.size !== 1) return null
+    if (targetMediaTypes.has(3)) return 'image'
+    if (targetMediaTypes.has(43)) return 'video'
+    return null
+  }
+
+  private async collectMessagesByFastMediaStream(
+    sessionId: string,
+    cleanedMyWxid: string,
+    normalizedDateRange: { start: number; end: number } | null,
+    useCursorTimeRange: boolean,
+    normalizedSenderUsernameFilter: string,
+    mediaType: 'image' | 'video',
+    onCollectProgress?: (payload: { fetched: number }) => void,
+    control?: ExportTaskControl
+  ): Promise<{
+    success: boolean
+    rows: any[]
+    senderUsernames: string[]
+    firstTime: number | null
+    lastTime: number | null
+    error?: string
+  }> {
+    const rows: any[] = []
+    const senderSet = new Set<string>()
+    let firstTime: number | null = null
+    let lastTime: number | null = null
+    let offset = 0
+    let hasMore = true
+    const PAGE_LIMIT = 480
+
+    while (hasMore) {
+      this.throwIfStopRequested(control)
+      const streamResult = await wcdbService.getMediaStream({
+        sessionId,
+        mediaType,
+        beginTimestamp: useCursorTimeRange ? (normalizedDateRange?.start || 0) : 0,
+        endTimestamp: useCursorTimeRange ? (normalizedDateRange?.end || 0) : 0,
+        limit: PAGE_LIMIT,
+        offset
+      })
+      if (!streamResult.success) {
+        return {
+          success: false,
+          rows,
+          senderUsernames: Array.from(senderSet),
+          firstTime,
+          lastTime,
+          error: streamResult.error || '媒体快速流读取失败'
+        }
+      }
+
+      const items = Array.isArray(streamResult.items) ? streamResult.items : []
+      if (items.length === 0) {
+        hasMore = false
+        break
+      }
+
+      for (const item of items) {
+        const createTime = this.normalizeRowTimestampSeconds(item?.createTime)
+        if (normalizedDateRange) {
+          if (createTime > 0 && normalizedDateRange.start > 0 && createTime < normalizedDateRange.start) continue
+          if (createTime > 0 && normalizedDateRange.end > 0 && createTime > normalizedDateRange.end) continue
+        }
+
+        const localTypeRaw = Number(item?.localType || 0)
+        let localType = Number.isFinite(localTypeRaw) ? Math.floor(localTypeRaw) : 0
+        if (localType <= 0) {
+          localType = mediaType === 'video' ? 43 : 3
+        }
+        const isSend = Number(item?.isSend) === 1
+        const senderUsernameRaw = String(item?.senderUsername || '').trim()
+        const actualSender = isSend ? cleanedMyWxid : (senderUsernameRaw || sessionId)
+        if (normalizedSenderUsernameFilter && !this.isSameWxid(actualSender, normalizedSenderUsernameFilter)) {
+          continue
+        }
+        senderSet.add(actualSender)
+
+        const localIdRaw = Number(item?.localId || 0)
+        const localId = Number.isFinite(localIdRaw) ? Math.floor(localIdRaw) : 0
+        const serverIdRawToken = this.normalizeUnsignedIntToken(item?.serverId)
+        const serverIdValue = Number.parseInt(serverIdRawToken, 10)
+
+        const imageMd5 = String(item?.imageMd5 || '').trim().toLowerCase()
+        const imageDatName = String(item?.imageDatName || '').trim().toLowerCase()
+        const videoMd5 = String(item?.videoMd5 || '').trim().toLowerCase()
+
+        rows.push({
+          localId,
+          serverId: Number.isFinite(serverIdValue) ? serverIdValue : 0,
+          serverIdRaw: serverIdRawToken !== '0' ? serverIdRawToken : undefined,
+          createTime,
+          localType,
+          content: String(item?.content || ''),
+          senderUsername: actualSender,
+          isSend,
+          imageMd5: imageMd5 || undefined,
+          imageDatName: imageDatName || undefined,
+          videoMd5: videoMd5 || undefined
+        })
+
+        if (createTime > 0) {
+          if (firstTime === null || createTime < firstTime) firstTime = createTime
+          if (lastTime === null || createTime > lastTime) lastTime = createTime
+        }
+      }
+
+      onCollectProgress?.({ fetched: rows.length })
+      const nextOffset = Number(streamResult.nextOffset)
+      const safeNextOffset = Number.isFinite(nextOffset) && nextOffset > offset
+        ? Math.floor(nextOffset)
+        : offset + items.length
+      offset = safeNextOffset
+      hasMore = Boolean(streamResult.hasMore) && items.length > 0
+    }
+
+    return {
+      success: true,
+      rows,
+      senderUsernames: Array.from(senderSet),
+      firstTime,
+      lastTime
+    }
   }
 
   private createCollectProgressReporter(
@@ -1020,12 +1296,17 @@ class ExportService {
     return true
   }
 
-  private shouldDecodeMessageContentInMediaMode(localType: number, targetMediaTypes: Set<number> | null): boolean {
-    if (!targetMediaTypes || !targetMediaTypes.has(localType)) return false
+  private shouldDecodeMessageContentInMediaMode(
+    localType: number,
+    targetMediaTypes: Set<number> | null,
+    options?: { allowFileProbe?: boolean }
+  ): boolean {
+    const allowFileProbe = options?.allowFileProbe === true
+    if (!targetMediaTypes || (!targetMediaTypes.has(localType) && !allowFileProbe)) return false
     // 语音导出仅需要 localId 读取音频数据，不依赖 XML 内容
     if (localType === 34) return false
-    // 图片/视频/表情可能需要从 XML 提取 md5/datName/cdnUrl
-    if (localType === 3 || localType === 43 || localType === 47) return true
+    // 图片/视频/表情/文件可能需要从 XML 提取 md5/datName/附件信息
+    if (localType === 3 || localType === 43 || localType === 47 || this.isFileAppLocalType(localType) || allowFileProbe) return true
     return false
   }
 
@@ -1051,6 +1332,106 @@ class ExportService {
       if (Number.isFinite(parsed)) return parsed
     }
     return fallback
+  }
+
+  private parseDateTimeTextToSeconds(value: string): number {
+    const raw = String(value || '').trim()
+    if (!raw) return 0
+    const compactDigits = this.parseCompactDateTimeDigitsToSeconds(raw)
+    if (compactDigits > 0) return compactDigits
+
+    // 优先处理带时区信息的格式（例如 2026-04-22T21:33:12Z / +08:00）
+    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)) {
+      const parsed = Date.parse(raw)
+      const seconds = Math.floor(parsed / 1000)
+      if (Number.isFinite(seconds) && seconds > 0) return seconds
+    }
+
+    const normalized = raw.replace('T', ' ').replace(/\.\d+$/, '').replace(/\//g, '-')
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ ](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/)
+    if (!match) return 0
+    const year = Number.parseInt(match[1], 10)
+    const month = Number.parseInt(match[2], 10)
+    const day = Number.parseInt(match[3], 10)
+    const hour = Number.parseInt(match[4] || '0', 10)
+    const minute = Number.parseInt(match[5] || '0', 10)
+    const second = Number.parseInt(match[6] || '0', 10)
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return 0
+    const dt = new Date(year, month - 1, day, hour, minute, second)
+    const ts = Math.floor(dt.getTime() / 1000)
+    return Number.isFinite(ts) && ts > 0 ? ts : 0
+  }
+
+  private parseCompactDateTimeDigitsToSeconds(value: string): number {
+    const raw = String(value || '').trim()
+    if (!/^\d{8}(?:\d{4}(?:\d{2})?)?$/.test(raw)) return 0
+
+    const year = Number.parseInt(raw.slice(0, 4), 10)
+    const month = Number.parseInt(raw.slice(4, 6), 10)
+    const day = Number.parseInt(raw.slice(6, 8), 10)
+    const hour = raw.length >= 12 ? Number.parseInt(raw.slice(8, 10), 10) : 0
+    const minute = raw.length >= 12 ? Number.parseInt(raw.slice(10, 12), 10) : 0
+    const second = raw.length >= 14 ? Number.parseInt(raw.slice(12, 14), 10) : 0
+
+    if (!Number.isFinite(year) || year < 1990 || year > 2200) return 0
+    if (!Number.isFinite(month) || month < 1 || month > 12) return 0
+    if (!Number.isFinite(day) || day < 1 || day > 31) return 0
+    if (!Number.isFinite(hour) || hour < 0 || hour > 23) return 0
+    if (!Number.isFinite(minute) || minute < 0 || minute > 59) return 0
+    if (!Number.isFinite(second) || second < 0 || second > 59) return 0
+
+    const dt = new Date(year, month - 1, day, hour, minute, second)
+    if (
+      dt.getFullYear() !== year ||
+      dt.getMonth() !== month - 1 ||
+      dt.getDate() !== day ||
+      dt.getHours() !== hour ||
+      dt.getMinutes() !== minute ||
+      dt.getSeconds() !== second
+    ) {
+      return 0
+    }
+
+    const ts = Math.floor(dt.getTime() / 1000)
+    return Number.isFinite(ts) && ts > 0 ? ts : 0
+  }
+
+  private normalizeRowTimestampSeconds(value: unknown): number {
+    if (value === undefined || value === null || value === '') return 0
+    const rawText = String(value || '').trim()
+    if (!rawText) return 0
+
+    // 纯数字且看起来是年月日时间串时，优先按日期解析，避免误当作毫秒。
+    const compactDigits = this.parseCompactDateTimeDigitsToSeconds(rawText)
+    if (compactDigits > 0) return compactDigits
+
+    const numeric = Number(rawText)
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return this.normalizeTimestampSeconds(numeric)
+    }
+
+    return this.parseDateTimeTextToSeconds(rawText)
+  }
+
+  private getTimestampSecondsFromRow(row: Record<string, any>): number {
+    const rawPrimary = this.getRowField(row, [
+      'create_time', 'createTime', 'createtime',
+      'msg_create_time', 'msgCreateTime',
+      'msg_time', 'msgTime', 'time',
+      'WCDB_CT_create_time'
+    ])
+    let primary = this.normalizeRowTimestampSeconds(rawPrimary)
+
+    const rawSortSeq = this.getRowField(row, ['sort_seq', 'sortSeq', 'server_seq', 'serverSeq'])
+    const sortSeqSeconds = this.normalizeRowTimestampSeconds(rawSortSeq)
+
+    // 对异常小时间戳兜底（例如 parseInt("2026-...") => 2026），优先回退 sort_seq。
+    if (primary > 0 && primary < 946684800 && sortSeqSeconds > 946684800) {
+      return sortSeqSeconds
+    }
+    if (primary > 0) return primary
+    if (sortSeqSeconds > 0) return sortSeqSeconds
+    return 0
   }
 
   private getRowField(row: Record<string, any>, keys: string[]): any {
@@ -3628,7 +4009,7 @@ class ExportService {
       )
     }
 
-    if ((localType === 49 || localType === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6') {
+    if (options.exportFiles && this.isFileAppMessage(msg)) {
       return this.exportFileAttachment(
         msg,
         mediaRootDir,
@@ -3658,43 +4039,31 @@ class ExportService {
         dirCache?.add(imagesDir)
       }
 
-      // 使用消息对象中已提取的字段
-      const imageMd5 = msg.imageMd5
-      const imageDatName = msg.imageDatName
+      const tryResolveImagePath = async (imageMd5?: string, imageDatName?: string): Promise<string | null> => {
+        if (!imageMd5 && !imageDatName) return null
 
-      if (!imageMd5 && !imageDatName) {
-        return null
-      }
-
-      const missingRunCacheKey = this.getImageMissingRunCacheKey(
-        sessionId,
-        imageMd5,
-        imageDatName
-      )
-      if (missingRunCacheKey && this.mediaRunMissingImageKeys.has(missingRunCacheKey)) {
-        return null
-      }
-
-      const result = await imageDecryptService.decryptImage({
-        sessionId,
-        imageMd5,
-        imageDatName,
-        createTime: msg.createTime,
-        force: true,  // 导出优先高清，失败再回退缩略图
-        preferFilePath: true,
-        hardlinkOnly: true,
-        disableUpdateCheck: true,
-        allowCacheIndex: !imageMd5,
-        suppressEvents: true
-      })
-
-      if (!result.success || !result.localPath) {
-        if (result.failureKind === 'decrypt_failed') {
-          console.log(`[Export] 图片解密失败 (localId=${msg.localId}): imageMd5=${imageMd5}, imageDatName=${imageDatName}, error=${result.error || '未知'}`)
-        } else {
-          console.log(`[Export] 图片本地无数据 (localId=${msg.localId}): imageMd5=${imageMd5}, imageDatName=${imageDatName}, error=${result.error || '未知'}`)
+        const decryptResult = await imageDecryptService.decryptImage({
+          sessionId,
+          imageMd5,
+          imageDatName,
+          createTime: msg.createTime,
+          force: true,  // 导出优先高清，失败再回退缩略图
+          preferFilePath: true,
+          hardlinkOnly: true,
+          disableUpdateCheck: true,
+          allowCacheIndex: !imageMd5,
+          suppressEvents: true
+        })
+        if (decryptResult.success && decryptResult.localPath) {
+          return decryptResult.localPath
         }
-        // 尝试获取缩略图
+
+        if (decryptResult.failureKind === 'decrypt_failed') {
+          console.log(`[Export] 图片解密失败 (localId=${msg.localId}): imageMd5=${imageMd5 || ''}, imageDatName=${imageDatName || ''}, error=${decryptResult.error || '未知'}`)
+        } else {
+          console.log(`[Export] 图片本地无数据 (localId=${msg.localId}): imageMd5=${imageMd5 || ''}, imageDatName=${imageDatName || ''}, error=${decryptResult.error || '未知'}`)
+        }
+
         const thumbResult = await imageDecryptService.resolveCachedImage({
           sessionId,
           imageMd5,
@@ -3707,14 +4076,38 @@ class ExportService {
         })
         if (thumbResult.success && thumbResult.localPath) {
           console.log(`[Export] 使用缩略图替代 (localId=${msg.localId}): ${thumbResult.localPath}`)
-          result.localPath = thumbResult.localPath
-        } else {
-          console.log(`[Export] 缩略图也获取失败，所有方式均失败 → 将显示 [图片] 占位符`)
-          if (missingRunCacheKey) {
-            this.mediaRunMissingImageKeys.add(missingRunCacheKey)
-          }
-          return null
+          return thumbResult.localPath
         }
+        return null
+      }
+
+      // 使用消息对象中已提取的字段，先尝试快速导出。
+      let imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
+      let imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
+      const initialMissingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName)
+      if (initialMissingRunCacheKey && this.mediaRunMissingImageKeys.has(initialMissingRunCacheKey)) {
+        return null
+      }
+      let sourcePath = await tryResolveImagePath(imageMd5, imageDatName)
+
+      // 快速流字段存在偏差时，按 localId 强制回填再重试一次，避免“导出进度前进但写入 0”。
+      if (!sourcePath) {
+        const localId = Number(msg?.localId || 0)
+        if (Number.isFinite(localId) && localId > 0) {
+          await this.backfillMediaFieldsFromMessageDetail(sessionId, [msg], new Set([3]), undefined, { force: true })
+          imageMd5 = String(msg.imageMd5 || '').trim().toLowerCase() || undefined
+          imageDatName = String(msg.imageDatName || '').trim().toLowerCase() || undefined
+          sourcePath = await tryResolveImagePath(imageMd5, imageDatName)
+        }
+      }
+
+      if (!sourcePath) {
+        const missingRunCacheKey = this.getImageMissingRunCacheKey(sessionId, imageMd5, imageDatName)
+        console.log(`[Export] 缩略图也获取失败，所有方式均失败 → 将显示 [图片] 占位符`)
+        if (missingRunCacheKey) {
+          this.mediaRunMissingImageKeys.add(missingRunCacheKey)
+        }
+        return null
       }
 
       // 为每条消息生成稳定且唯一的文件名前缀，避免跨日期/消息发生同名覆盖
@@ -3722,7 +4115,6 @@ class ExportService {
       const imageKey = (imageMd5 || imageDatName || 'image').replace(/[^a-zA-Z0-9_-]/g, '')
 
       // 从 data URL 或 file URL 获取实际路径
-      let sourcePath: string = result.localPath!
       if (sourcePath.startsWith('data:')) {
         // 是 data URL，需要保存为文件
         const base64Data = sourcePath.split(',')[1]
@@ -3992,18 +4384,29 @@ class ExportService {
     includePoster = false
   ): Promise<MediaExportItem | null> {
     try {
-      const videoMd5 = msg.videoMd5
-      if (!videoMd5) return null
+      let videoMd5 = String(msg.videoMd5 || '').trim().toLowerCase()
+      const resolveVideoInfo = async (token: string) => {
+        if (!token) return null
+        const videoInfo = await videoService.getVideoInfo(token, { includePoster })
+        if (!videoInfo.exists || !videoInfo.videoUrl) return null
+        return videoInfo
+      }
+
+      let videoInfo = await resolveVideoInfo(videoMd5)
+      if (!videoInfo) {
+        const localId = Number(msg?.localId || 0)
+        if (Number.isFinite(localId) && localId > 0) {
+          await this.backfillMediaFieldsFromMessageDetail(sessionId, [msg], new Set([43]), undefined, { force: true })
+          videoMd5 = String(msg.videoMd5 || '').trim().toLowerCase()
+          videoInfo = await resolveVideoInfo(videoMd5)
+        }
+      }
+      if (!videoInfo) return null
 
       const videosDir = path.join(mediaRootDir, mediaRelativePrefix, 'videos')
       if (!dirCache?.has(videosDir)) {
         await fs.promises.mkdir(videosDir, { recursive: true })
         dirCache?.add(videosDir)
-      }
-
-      const videoInfo = await videoService.getVideoInfo(videoMd5, { includePoster })
-      if (!videoInfo.exists || !videoInfo.videoUrl) {
-        return null
       }
 
       const sourcePath = videoInfo.videoUrl
@@ -4183,33 +4586,104 @@ class ExportService {
     return this.normalizeVideoFileToken(this.extractVideoMd5(content || ''))
   }
 
-  private resolveFileAttachmentRoots(): string[] {
+  private isFileAttachmentAccountDir(dirPath: string): boolean {
+    if (!dirPath) return false
+    return fs.existsSync(path.join(dirPath, 'db_storage')) ||
+      fs.existsSync(path.join(dirPath, 'msg', 'file')) ||
+      fs.existsSync(path.join(dirPath, 'FileStorage', 'File')) ||
+      fs.existsSync(path.join(dirPath, 'FileStorage', 'Image')) ||
+      fs.existsSync(path.join(dirPath, 'FileStorage', 'Image2'))
+  }
+
+  private resolveAccountDirForFileExport(basePath: string, wxid: string): string | null {
+    const cleanedWxid = this.cleanAccountDirName(wxid)
+    if (!basePath || !cleanedWxid) return null
+
+    const normalized = path.resolve(basePath.replace(/[\\/]+$/, ''))
+    const parentDir = path.dirname(normalized)
+    const dbStorageParent = path.basename(normalized).toLowerCase() === 'db_storage'
+      ? path.dirname(normalized)
+      : ''
+    const fileInsideDbStorageParent = path.basename(parentDir).toLowerCase() === 'db_storage'
+      ? path.dirname(parentDir)
+      : ''
+    const candidateBases = Array.from(new Set([
+      normalized,
+      parentDir,
+      path.join(normalized, 'WeChat Files'),
+      path.join(parentDir, 'WeChat Files'),
+      dbStorageParent,
+      fileInsideDbStorageParent
+    ].filter(Boolean)))
+
+    const lowerWxid = cleanedWxid.toLowerCase()
+    const tryResolveBase = (candidateBase: string): string | null => {
+      if (!candidateBase || !fs.existsSync(candidateBase)) return null
+      if (this.isFileAttachmentAccountDir(candidateBase)) return candidateBase
+
+      const direct = path.join(candidateBase, cleanedWxid)
+      if (this.isFileAttachmentAccountDir(direct)) return direct
+
+      try {
+        const entries = fs.readdirSync(candidateBase, { withFileTypes: true })
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue
+          const lowerEntry = entry.name.toLowerCase()
+          if (lowerEntry === lowerWxid || lowerEntry.startsWith(`${lowerWxid}_`)) {
+            const entryPath = path.join(candidateBase, entry.name)
+            if (this.isFileAttachmentAccountDir(entryPath)) {
+              return entryPath
+            }
+          }
+        }
+      } catch {
+        return null
+      }
+
+      return null
+    }
+
+    for (const candidateBase of candidateBases) {
+      const resolved = tryResolveBase(candidateBase)
+      if (resolved) return resolved
+    }
+
+    return null
+  }
+
+  private resolveFileAttachmentSearchRoots(): FileAttachmentSearchRoot[] {
     const dbPath = String(this.configService.get('dbPath') || '').trim()
     const rawWxid = String(this.configService.get('myWxid') || '').trim()
     const cleanedWxid = this.cleanAccountDirName(rawWxid)
     if (!dbPath) return []
 
-    const normalized = dbPath.replace(/[\\/]+$/, '')
-    const roots = new Set<string>()
-    const tryAddRoot = (candidate: string) => {
-      const fileRoot = path.join(candidate, 'msg', 'file')
-      if (fs.existsSync(fileRoot)) {
-        roots.add(fileRoot)
+    const normalized = path.resolve(dbPath.replace(/[\\/]+$/, ''))
+    const accountDirs = new Set<string>()
+    const maybeAddAccountDir = (candidate: string | null | undefined) => {
+      if (!candidate) return
+      const resolved = path.resolve(candidate)
+      if (this.isFileAttachmentAccountDir(resolved)) {
+        accountDirs.add(resolved)
       }
     }
 
-    tryAddRoot(normalized)
-    if (rawWxid) tryAddRoot(path.join(normalized, rawWxid))
-    if (cleanedWxid && cleanedWxid !== rawWxid) tryAddRoot(path.join(normalized, cleanedWxid))
+    maybeAddAccountDir(normalized)
+    maybeAddAccountDir(path.dirname(normalized))
 
-    const dbStoragePath =
-      this.resolveDbStoragePathForExport(normalized, cleanedWxid) ||
-      this.resolveDbStoragePathForExport(normalized, rawWxid)
-    if (dbStoragePath) {
-      tryAddRoot(path.dirname(dbStoragePath))
+    const wxidCandidates = Array.from(new Set([cleanedWxid, rawWxid].filter(Boolean)))
+    for (const wxid of wxidCandidates) {
+      maybeAddAccountDir(this.resolveAccountDirForFileExport(normalized, wxid))
     }
 
-    return Array.from(roots)
+    return Array.from(accountDirs).map((accountDir) => {
+      const msgFileRoot = path.join(accountDir, 'msg', 'file')
+      const fileStorageRoot = path.join(accountDir, 'FileStorage', 'File')
+      return {
+        accountDir,
+        msgFileRoot: fs.existsSync(msgFileRoot) ? msgFileRoot : undefined,
+        fileStorageRoot: fs.existsSync(fileStorageRoot) ? fileStorageRoot : undefined
+      }
+    }).filter((root) => Boolean(root.msgFileRoot || root.fileStorageRoot))
   }
 
   private buildPreferredFileYearMonths(createTime?: unknown): string[] {
@@ -4241,51 +4715,146 @@ class ExportService {
     }
   }
 
-  private async resolveFileAttachmentCandidates(msg: any): Promise<FileExportCandidate[]> {
-    const fileName = String(msg?.fileName || '').trim()
-    if (!fileName) return []
+  private collectFileStorageCandidatesByName(rootDir: string, fileName: string, maxDepth = 3): string[] {
+    const normalizedName = String(fileName || '').trim().toLowerCase()
+    if (!rootDir || !normalizedName) return []
 
-    const roots = this.resolveFileAttachmentRoots()
-    if (roots.length === 0) return []
+    const matches: string[] = []
+    const stack: Array<{ dir: string; depth: number }> = [{ dir: rootDir, depth: 0 }]
 
-    const normalizedMd5 = String(msg?.fileMd5 || '').trim().toLowerCase()
-    const preferredMonths = this.buildPreferredFileYearMonths(msg?.createTime)
-    const candidates: FileExportCandidate[] = []
-    const seen = new Set<string>()
-
-    for (const root of roots) {
-      let monthDirs: string[] = []
+    while (stack.length > 0) {
+      const current = stack.pop()!
+      let entries: fs.Dirent[]
       try {
-        monthDirs = fs.readdirSync(root)
-          .filter(entry => /^\d{4}-\d{2}$/.test(entry) && fs.existsSync(path.join(root, entry)))
-          .sort()
+        entries = fs.readdirSync(current.dir, { withFileTypes: true })
       } catch {
         continue
       }
 
-      const orderedMonths = Array.from(new Set([
-        ...preferredMonths,
-        ...monthDirs.slice().reverse()
-      ]))
-
-      for (const month of orderedMonths) {
-        const sourcePath = path.join(root, month, fileName)
-        if (!fs.existsSync(sourcePath)) continue
-        const resolvedPath = path.resolve(sourcePath)
-        if (seen.has(resolvedPath)) continue
-        seen.add(resolvedPath)
-
-        if (normalizedMd5) {
-          const ok = await this.verifyFileHash(resolvedPath, normalizedMd5)
-          if (ok) {
-            candidates.unshift({ sourcePath: resolvedPath, matchedBy: 'md5', yearMonth: month })
-            continue
-          }
+      for (const entry of entries) {
+        const entryPath = path.join(current.dir, entry.name)
+        if (entry.isFile() && entry.name.toLowerCase() === normalizedName) {
+          matches.push(entryPath)
+          continue
         }
-
-        candidates.push({ sourcePath: resolvedPath, matchedBy: 'name', yearMonth: month })
+        if (entry.isDirectory() && current.depth < maxDepth) {
+          stack.push({ dir: entryPath, depth: current.depth + 1 })
+        }
       }
     }
+
+    return matches
+  }
+
+  private getFileAttachmentLogContext(msg: any): Record<string, unknown> {
+    return {
+      localId: msg?.localId,
+      createTime: msg?.createTime,
+      localType: msg?.localType,
+      xmlType: msg?.xmlType,
+      fileName: msg?.fileName,
+      fileMd5: msg?.fileMd5
+    }
+  }
+
+  private logFileAttachmentEvent(
+    level: 'warn' | 'error',
+    action: string,
+    msg: any,
+    extra: Record<string, unknown> = {}
+  ): void {
+    const logger = level === 'error' ? console.error : console.warn
+    logger(`[Export][File] ${action}`, {
+      ...this.getFileAttachmentLogContext(msg),
+      ...extra
+    })
+  }
+
+  private recordFileAttachmentMiss(msg: any, action: string, extra: Record<string, unknown> = {}): void {
+    this.logFileAttachmentEvent('warn', action, msg, extra)
+    this.noteMediaTelemetry({ cacheMissFiles: 1 })
+  }
+
+  private async resolveFileAttachmentCandidates(msg: any): Promise<FileExportCandidate[]> {
+    const fileName = String(msg?.fileName || '').trim()
+    if (!fileName) return []
+
+    const roots = this.resolveFileAttachmentSearchRoots()
+    if (roots.length === 0) return []
+
+    const normalizedMd5 = String(msg?.fileMd5 || '').trim().toLowerCase()
+    const preferredMonths = new Set(this.buildPreferredFileYearMonths(msg?.createTime))
+    const candidates: FileExportCandidate[] = []
+    const seen = new Set<string>()
+    let searchOrder = 0
+
+    const appendCandidate = async (sourcePath: string, yearMonth?: string) => {
+      if (!sourcePath || !fs.existsSync(sourcePath)) return
+
+      const resolvedPath = path.resolve(sourcePath)
+      if (seen.has(resolvedPath)) return
+
+      let stat: fs.Stats
+      try {
+        stat = await fs.promises.stat(resolvedPath)
+      } catch {
+        return
+      }
+      if (!stat.isFile()) return
+
+      seen.add(resolvedPath)
+      const matchedBy = normalizedMd5 && await this.verifyFileHash(resolvedPath, normalizedMd5) ? 'md5' : 'name'
+      candidates.push({
+        sourcePath: resolvedPath,
+        matchedBy,
+        yearMonth,
+        preferredMonth: Boolean(yearMonth && preferredMonths.has(yearMonth)),
+        mtimeMs: Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0,
+        searchOrder: searchOrder++
+      })
+    }
+
+    for (const root of roots) {
+      if (root.msgFileRoot) {
+        for (const month of preferredMonths) {
+          await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+        }
+
+        let monthDirs: string[] = []
+        try {
+          monthDirs = fs.readdirSync(root.msgFileRoot, { withFileTypes: true })
+            .filter(entry => entry.isDirectory() && /^\d{4}-\d{2}$/.test(entry.name) && !preferredMonths.has(entry.name))
+            .map(entry => entry.name)
+            .sort()
+        } catch {
+          monthDirs = []
+        }
+
+        for (const month of monthDirs) {
+          await appendCandidate(path.join(root.msgFileRoot, month, fileName), month)
+        }
+        await appendCandidate(path.join(root.msgFileRoot, fileName))
+      }
+
+      if (root.fileStorageRoot) {
+        for (const candidatePath of this.collectFileStorageCandidatesByName(root.fileStorageRoot, fileName, 3)) {
+          await appendCandidate(candidatePath)
+        }
+      }
+    }
+
+    candidates.sort((left, right) => {
+      if (left.matchedBy !== right.matchedBy) {
+        return left.matchedBy === 'md5' ? -1 : 1
+      }
+      if (left.preferredMonth !== right.preferredMonth) {
+        return left.preferredMonth ? -1 : 1
+      }
+      if (left.mtimeMs !== right.mtimeMs) {
+        return right.mtimeMs - left.mtimeMs
+      }
+      return left.searchOrder - right.searchOrder
+    })
 
     return candidates
   }
@@ -4301,14 +4870,20 @@ class ExportService {
       const fileNameRaw = String(msg?.fileName || '').trim()
       if (!fileNameRaw) return null
 
-      const filesDir = path.join(mediaRootDir, mediaRelativePrefix, 'files')
-      if (!dirCache?.has(filesDir)) {
-        await fs.promises.mkdir(filesDir, { recursive: true })
-        dirCache?.add(filesDir)
+      const fileExtDir = this.resolveFileAttachmentExtensionDir(msg, fileNameRaw)
+      const fileDir = path.join(mediaRootDir, mediaRelativePrefix, 'file', fileExtDir)
+      if (!dirCache?.has(fileDir)) {
+        await fs.promises.mkdir(fileDir, { recursive: true })
+        dirCache?.add(fileDir)
       }
 
       const candidates = await this.resolveFileAttachmentCandidates(msg)
-      if (candidates.length === 0) return null
+      if (candidates.length === 0) {
+        this.recordFileAttachmentMiss(msg, '附件候选未命中', {
+          searchRoots: this.resolveFileAttachmentSearchRoots().map(root => root.accountDir)
+        })
+        return null
+      }
 
       const maxBytes = Number.isFinite(maxFileSizeMb)
         ? Math.max(0, Math.floor(Number(maxFileSizeMb) * 1024 * 1024))
@@ -4316,28 +4891,54 @@ class ExportService {
 
       const selected = candidates[0]
       const stat = await fs.promises.stat(selected.sourcePath)
-      if (!stat.isFile()) return null
-      if (maxBytes > 0 && stat.size > maxBytes) return null
+      if (!stat.isFile()) {
+        this.recordFileAttachmentMiss(msg, '附件候选不是普通文件', {
+          sourcePath: selected.sourcePath
+        })
+        return null
+      }
+      if (maxBytes > 0 && stat.size > maxBytes) {
+        this.recordFileAttachmentMiss(msg, '附件超过大小限制', {
+          sourcePath: selected.sourcePath,
+          size: stat.size,
+          maxBytes
+        })
+        return null
+      }
 
       const normalizedMd5 = String(msg?.fileMd5 || '').trim().toLowerCase()
       if (normalizedMd5 && selected.matchedBy !== 'md5') {
-        const verified = await this.verifyFileHash(selected.sourcePath, normalizedMd5)
-        if (!verified) return null
+        this.recordFileAttachmentMiss(msg, '附件哈希校验失败', {
+          sourcePath: selected.sourcePath,
+          expectedMd5: normalizedMd5
+        })
+        return null
       }
 
       const safeBaseName = path.basename(fileNameRaw).replace(/[\\/:*?"<>|]/g, '_') || 'file'
       const messageId = String(msg?.localId || Date.now())
       const destFileName = `${messageId}_${safeBaseName}`
-      const destPath = path.join(filesDir, destFileName)
+      const destPath = path.join(fileDir, destFileName)
       const copied = await this.copyFileOptimized(selected.sourcePath, destPath)
-      if (!copied.success) return null
+      if (!copied.success) {
+        this.recordFileAttachmentMiss(msg, '附件复制失败', {
+          sourcePath: selected.sourcePath,
+          destPath,
+          code: copied.code
+        })
+        return null
+      }
 
       this.noteMediaTelemetry({ doneFiles: 1, bytesWritten: stat.size })
       return {
-        relativePath: path.posix.join(mediaRelativePrefix, 'files', destFileName),
+        relativePath: path.posix.join(mediaRelativePrefix, 'file', fileExtDir, destFileName),
         kind: 'file'
       }
-    } catch {
+    } catch (error) {
+      this.logFileAttachmentEvent('error', '附件导出异常', msg, {
+        error: error instanceof Error ? error.message : String(error || 'unknown')
+      })
+      this.noteMediaTelemetry({ cacheMissFiles: 1 })
       return null
     }
   }
@@ -4420,6 +5021,45 @@ class ExportService {
     return { exportMediaEnabled, mediaRootDir: outputDir, mediaRelativePrefix }
   }
 
+  private collectMediaMessagesForExport(messages: any[], options: ExportOptions): any[] {
+    if (!this.isMediaExportEnabled(options)) return []
+
+    return messages.filter((msg) => {
+      const localType = Number(msg?.localType || 0)
+      return (localType === 3 && options.exportImages) ||
+        (localType === 47 && options.exportEmojis) ||
+        (localType === 43 && options.exportVideos) ||
+        (localType === 34 && options.exportVoices) ||
+        (options.exportFiles === true && this.isFileAppMessage(msg))
+    })
+  }
+
+  private getMediaDoneFilesCount(): number {
+    return this.mediaExportTelemetry?.doneFiles ?? 0
+  }
+
+  private formatMediaPhaseLabel(processed: number, total: number, beforeDoneFiles: number): string {
+    const safeProcessed = Math.max(0, Math.floor(processed || 0))
+    const safeTotal = Math.max(0, Math.floor(total || 0))
+    const writtenNow = Math.max(0, this.getMediaDoneFilesCount() - Math.max(0, Math.floor(beforeDoneFiles || 0)))
+    return `导出媒体 ${Math.min(safeProcessed, safeTotal)}/${safeTotal}（已写入 ${writtenNow}）`
+  }
+
+  private buildFileOnlyExportFailure(
+    options: ExportOptions,
+    mediaMessages: any[],
+    beforeDoneFiles: number
+  ): { success: boolean; error?: string } | null {
+    if (options.contentType !== 'file') return null
+    if (!mediaMessages.some(msg => this.isFileAppMessage(msg))) return null
+    if (this.getMediaDoneFilesCount() > beforeDoneFiles) return null
+
+    return {
+      success: false,
+      error: '检测到文件消息，但未找到可导出的源文件，请检查数据库路径或文件存储目录配置'
+    }
+  }
+
   /**
    * 下载文件
    */
@@ -4475,82 +5115,142 @@ class ExportService {
     collectMode: MessageCollectMode = 'full',
     targetMediaTypes?: Set<number>,
     control?: ExportTaskControl,
-    onCollectProgress?: (payload: { fetched: number }) => void
-  ): Promise<{ rows: any[]; memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>; firstTime: number | null; lastTime: number | null }> {
+    onCollectProgress?: (payload: { fetched: number }) => void,
+    allowLiteFallback = true,
+    allowRangeFallback = true,
+    useCursorTimeRange = true,
+    allowModeFallback = true
+  ): Promise<{ rows: any[]; memberSet: Map<string, { member: ChatLabMember; avatarUrl?: string }>; firstTime: number | null; lastTime: number | null; error?: string }> {
     const rows: any[] = []
     const memberSet = new Map<string, { member: ChatLabMember; avatarUrl?: string }>()
     const senderSet = new Set<string>()
     let firstTime: number | null = null
     let lastTime: number | null = null
-    const mediaTypeFilter = collectMode === 'media-fast' && targetMediaTypes && targetMediaTypes.size > 0
+    const mediaTypeFilter = targetMediaTypes && targetMediaTypes.size > 0
       ? targetMediaTypes
       : null
+    const fileOnlyMediaFilter = this.isFileOnlyMediaFilter(mediaTypeFilter)
 
-    // 修复时间范围：0 表示不限制，而不是时间戳 0
-    const beginTime = dateRange?.start || 0
-    const endTime = dateRange?.end && dateRange.end > 0 ? dateRange.end : 0
+    const normalizedDateRange = this.normalizeExportDateRange(dateRange)
+    const normalizedSenderUsernameFilter = String(senderUsernameFilter || '').trim()
+    const beginTime = useCursorTimeRange ? (normalizedDateRange?.start || 0) : 0
+    const endTime = useCursorTimeRange ? (normalizedDateRange?.end || 0) : 0
     
     const batchSize = (collectMode === 'text-fast' || collectMode === 'media-fast') ? 2000 : 500
     this.throwIfStopRequested(control)
-    const cursor = collectMode === 'media-fast'
-      ? await wcdbService.openMessageCursorLite(
+    const fastMediaType = this.resolveFastMediaStreamType(collectMode, mediaTypeFilter)
+    let usedFastMediaStream = false
+    let usedLiteCursor = false
+    if (fastMediaType) {
+      const streamCollected = await this.collectMessagesByFastMediaStream(
         sessionId,
-        batchSize,
-        true,
-        beginTime,
-        endTime
+        cleanedMyWxid,
+        normalizedDateRange,
+        useCursorTimeRange,
+        normalizedSenderUsernameFilter,
+        fastMediaType,
+        onCollectProgress,
+        control
       )
-      : await wcdbService.openMessageCursor(
-        sessionId,
-        batchSize,
-        true,
-        beginTime,
-        endTime
-      )
-    if (!cursor.success || !cursor.cursor) {
-      console.error(`[Export] 打开游标失败: ${cursor.error || '未知错误'}`)
-      return { rows, memberSet, firstTime, lastTime }
+      if (streamCollected.success) {
+        usedFastMediaStream = true
+        rows.push(...streamCollected.rows)
+        for (const username of streamCollected.senderUsernames) {
+          senderSet.add(username)
+        }
+        firstTime = streamCollected.firstTime
+        lastTime = streamCollected.lastTime
+      } else {
+        console.warn(`[Export] 媒体快速流读取失败，回退游标链路: session=${sessionId}, type=${fastMediaType}, error=${streamCollected.error || 'unknown'}`)
+      }
     }
 
-    try {
-      let hasMore = true
-      let batchCount = 0
-      while (hasMore) {
-        this.throwIfStopRequested(control)
-        const batch = await wcdbService.fetchMessageBatch(cursor.cursor)
-        batchCount++
-        
-        if (!batch.success) {
-          console.error(`[Export] 获取批次 ${batchCount} 失败: ${batch.error}`)
-          break
+    if (!usedFastMediaStream) {
+      // 媒体导出链路必须优先保证字段完整性，否则会出现“进度前进但无文件写出”。
+      // 轻量游标仅用于文本快路径；媒体快路径保留标准游标。
+      usedLiteCursor = allowLiteFallback && collectMode === 'text-fast'
+      let cursor = usedLiteCursor
+        ? await wcdbService.openMessageCursorLite(
+          sessionId,
+          batchSize,
+          true,
+          beginTime,
+          endTime
+        )
+        : await wcdbService.openMessageCursor(
+          sessionId,
+          batchSize,
+          true,
+          beginTime,
+          endTime
+        )
+      if (!cursor.success || !cursor.cursor) {
+        if (usedLiteCursor && allowLiteFallback) {
+          console.warn(`[Export] 轻量游标打开失败，回退标准游标重试: ${cursor.error || '未知错误'}`)
+          return this.collectMessages(
+            sessionId,
+            cleanedMyWxid,
+            normalizedDateRange,
+            senderUsernameFilter,
+            collectMode,
+            targetMediaTypes,
+            control,
+            onCollectProgress,
+            false,
+            allowRangeFallback,
+            useCursorTimeRange,
+            allowModeFallback
+          )
         }
-        
-        if (!batch.rows) break
-        
-        let rowIndex = 0
-        for (const row of batch.rows) {
+        console.error(`[Export] 打开游标失败: ${cursor.error || '未知错误'}`)
+        return {
+          rows,
+          memberSet,
+          firstTime,
+          lastTime,
+          error: cursor.error || '打开消息游标失败'
+        }
+      }
+
+      try {
+        let hasMore = true
+        let batchCount = 0
+        while (hasMore) {
+          this.throwIfStopRequested(control)
+          const batch = await wcdbService.fetchMessageBatch(cursor.cursor)
+          batchCount++
+          
+          if (!batch.success) {
+            console.error(`[Export] 获取批次 ${batchCount} 失败: ${batch.error}`)
+            break
+          }
+          
+          if (!batch.rows) break
+          
+          let rowIndex = 0
+          for (const row of batch.rows) {
           if ((rowIndex++ & 0x7f) === 0) {
             this.throwIfStopRequested(control)
           }
-          const createTime = this.getIntFromRow(row, [
-            'create_time', 'createTime', 'createtime',
-            'msg_create_time', 'msgCreateTime',
-            'msg_time', 'msgTime', 'time',
-            'WCDB_CT_create_time'
-          ], 0)
-          if (dateRange) {
-            if (createTime < dateRange.start || createTime > dateRange.end) continue
+          const createTime = this.getTimestampSecondsFromRow(row)
+          if (normalizedDateRange) {
+            if (createTime > 0 && normalizedDateRange.start > 0 && createTime < normalizedDateRange.start) continue
+            if (createTime > 0 && normalizedDateRange.end > 0 && createTime > normalizedDateRange.end) continue
           }
 
           const localType = this.getIntFromRow(row, [
             'local_type', 'localType', 'type', 'msg_type', 'msgType', 'WCDB_CT_local_type'
           ], 1)
-          if (mediaTypeFilter && !mediaTypeFilter.has(localType)) {
+          const rowFileHints = collectMode === 'text-fast'
+            ? {}
+            : this.getFileAppMessageHints(row)
+          const allowFileProbe = collectMode !== 'text-fast' && fileOnlyMediaFilter && this.hasFileAppMessageHints(row)
+          if (mediaTypeFilter && !mediaTypeFilter.has(localType) && !allowFileProbe) {
             continue
           }
           const shouldDecodeContent = collectMode === 'full'
             || (collectMode === 'text-fast' && this.shouldDecodeMessageContentInFastMode(localType))
-            || (collectMode === 'media-fast' && this.shouldDecodeMessageContentInMediaMode(localType, mediaTypeFilter))
+            || (collectMode === 'media-fast' && this.shouldDecodeMessageContentInMediaMode(localType, mediaTypeFilter, { allowFileProbe }))
           const content = shouldDecodeContent
             ? this.decodeMessageContent(row.message_content, row.compress_content)
             : ''
@@ -4602,10 +5302,26 @@ class ExportService {
             actualSender = isSend ? cleanedMyWxid : (senderUsername || sessionId)
           }
 
-          if (senderUsernameFilter && !this.isSameWxid(actualSender, senderUsernameFilter)) {
+          if (normalizedSenderUsernameFilter && !this.isSameWxid(actualSender, normalizedSenderUsernameFilter)) {
             continue
           }
           senderSet.add(actualSender)
+
+          if (collectMode === 'text-fast') {
+            rows.push({
+              localId,
+              serverId,
+              serverIdRaw: serverIdRaw !== '0' ? serverIdRaw : undefined,
+              createTime,
+              localType,
+              content,
+              senderUsername: actualSender,
+              isSend
+            })
+            if (firstTime === null || createTime < firstTime) firstTime = createTime
+            if (lastTime === null || createTime > lastTime) lastTime = createTime
+            continue
+          }
 
           // 提取媒体相关字段（轻量模式下跳过）
           let imageMd5: string | undefined
@@ -4619,6 +5335,11 @@ class ExportService {
           let locationLabel: string | undefined
           let chatRecordList: any[] | undefined
           let emojiCaption: string | undefined
+          let xmlType: string | undefined
+          let fileName: string | undefined
+          let fileSize: number | undefined
+          let fileExt: string | undefined
+          let fileMd5: string | undefined
 
           if (localType === 48 && content) {
             const locationMeta = this.extractLocationMeta(content, localType)
@@ -4649,6 +5370,22 @@ class ExportService {
             imageMd5 = String(row.image_md5 || row.imageMd5 || '').trim() || undefined
             imageDatName = String(row.image_dat_name || row.imageDatName || '').trim() || undefined
             videoMd5 = this.extractVideoFileNameFromRow(row, content)
+            xmlType = rowFileHints.xmlType
+            fileName = rowFileHints.fileName
+            fileExt = rowFileHints.fileExt
+            fileSize = rowFileHints.fileSize
+            fileMd5 = rowFileHints.fileMd5
+
+            if (content && (this.isFileAppLocalType(localType) || allowFileProbe || this.hasFileAppMessageHints({ xmlType, fileName, fileSize, fileExt, fileMd5 }))) {
+              const fileMeta = this.extractFileAppMessageMeta(content)
+              if (fileMeta) {
+                xmlType = fileMeta.xmlType || xmlType
+                fileName = fileMeta.fileName || fileName
+                fileSize = fileMeta.fileSize || fileSize
+                fileExt = fileMeta.fileExt || fileExt
+                fileMd5 = fileMeta.fileMd5 || fileMd5
+              }
+            }
 
             if (localType === 3 && content) {
               // 图片消息
@@ -4667,6 +5404,10 @@ class ExportService {
             }
           }
 
+          if (fileOnlyMediaFilter && !this.isFileAppMessage({ localType, xmlType, content, fileName, fileExt, fileMd5, fileSize })) {
+            continue
+          }
+
           rows.push({
             localId,
             serverId,
@@ -4682,6 +5423,11 @@ class ExportService {
             emojiMd5,
             emojiCaption,
             videoMd5,
+            xmlType,
+            fileName,
+            fileSize,
+            fileExt,
+            fileMd5,
             locationLat,
             locationLng,
             locationPoiname,
@@ -4691,20 +5437,75 @@ class ExportService {
 
           if (firstTime === null || createTime < firstTime) firstTime = createTime
           if (lastTime === null || createTime > lastTime) lastTime = createTime
+          }
+          onCollectProgress?.({ fetched: rows.length })
+          hasMore = batch.hasMore === true
         }
-        onCollectProgress?.({ fetched: rows.length })
-        hasMore = batch.hasMore === true
-      }
-      
-    } catch (err) {
-      if (this.isStopError(err)) throw err
-      console.error(`[Export] 收集消息异常:`, err)
-    } finally {
-      try {
-        await wcdbService.closeMessageCursor(cursor.cursor)
+        
       } catch (err) {
-        console.error(`[Export] 关闭游标失败:`, err)
+        if (this.isStopError(err)) throw err
+        console.error(`[Export] 收集消息异常:`, err)
+      } finally {
+        try {
+          await wcdbService.closeMessageCursor(cursor.cursor)
+        } catch (err) {
+          console.error(`[Export] 关闭游标失败:`, err)
+        }
       }
+    }
+
+    if (rows.length === 0 && usedLiteCursor && allowLiteFallback) {
+      console.warn(`[Export] 轻量游标返回 0 条，回退标准游标重试: session=${sessionId}, range=${beginTime}-${endTime}`)
+      return this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        normalizedDateRange,
+        senderUsernameFilter,
+        collectMode,
+        targetMediaTypes,
+        control,
+        onCollectProgress,
+        false,
+        allowRangeFallback,
+        useCursorTimeRange,
+        allowModeFallback
+      )
+    }
+
+    if (rows.length === 0 && collectMode === 'media-fast' && allowModeFallback) {
+      console.warn(`[Export] media-fast 返回 0 条，回退 full 模式重试: session=${sessionId}`)
+      return this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        normalizedDateRange,
+        senderUsernameFilter,
+        'full',
+        mediaTypeFilter || undefined,
+        control,
+        onCollectProgress,
+        false,
+        allowRangeFallback,
+        useCursorTimeRange,
+        false
+      )
+    }
+
+    if (rows.length === 0 && allowRangeFallback && normalizedDateRange && useCursorTimeRange) {
+      console.warn(`[Export] 时间范围游标返回 0 条，回退为全量游标+本地过滤重试: session=${sessionId}, range=${normalizedDateRange.start}-${normalizedDateRange.end}`)
+      return this.collectMessages(
+        sessionId,
+        cleanedMyWxid,
+        normalizedDateRange,
+        senderUsernameFilter,
+        collectMode,
+        targetMediaTypes,
+        control,
+        onCollectProgress,
+        allowLiteFallback,
+        false,
+        false,
+        allowModeFallback
+      )
     }
 
     this.throwIfStopRequested(control)
@@ -4744,9 +5545,19 @@ class ExportService {
     sessionId: string,
     rows: any[],
     targetMediaTypes: Set<number>,
-    control?: ExportTaskControl
+    control?: ExportTaskControl,
+    options?: { force?: boolean }
   ): Promise<void> {
+    const force = options?.force === true
+    const fileOnlyMediaFilter = this.isFileOnlyMediaFilter(targetMediaTypes)
     const needsBackfill = rows.filter((msg) => {
+      if (force) {
+        return Number(msg?.localId || 0) > 0
+      }
+      const isFileCandidate = this.isFileAppLocalType(Number(msg.localType || 0)) || (fileOnlyMediaFilter && this.hasFileAppMessageHints(msg))
+      if (isFileCandidate) {
+        return !msg.xmlType || !msg.fileName || !msg.fileMd5 || !msg.fileSize || !msg.fileExt
+      }
       if (!targetMediaTypes.has(msg.localType)) return false
       if (msg.localType === 3) return !msg.imageMd5 && !msg.imageDatName
       if (msg.localType === 47) return !msg.emojiMd5
@@ -4778,8 +5589,8 @@ class ExportService {
         const supplementalPayload = `${this.decodeMaybeCompressed(String(packedInfoRaw || ''))}\n${this.decodeMaybeCompressed(String(reserved0Raw || ''))}`
 
         if (msg.localType === 3) {
-          const imageMd5 = String(row.image_md5 || row.imageMd5 || '').trim() || this.extractImageMd5(content)
-          const imageDatName = String(row.image_dat_name || row.imageDatName || '').trim() || this.extractImageDatName(content)
+          const imageMd5 = (String(row.image_md5 || row.imageMd5 || '').trim() || this.extractImageMd5(content) || '').toLowerCase()
+          const imageDatName = (String(row.image_dat_name || row.imageDatName || '').trim() || this.extractImageDatName(content) || '').toLowerCase()
           if (imageMd5) msg.imageMd5 = imageMd5
           if (imageDatName) msg.imageDatName = imageDatName
           return
@@ -4801,8 +5612,26 @@ class ExportService {
         }
 
         if (msg.localType === 43) {
-          const videoMd5 = this.extractVideoFileNameFromRow(row, content)
+          const videoMd5 = String(this.extractVideoFileNameFromRow(row, content) || '').trim().toLowerCase()
           if (videoMd5) msg.videoMd5 = videoMd5
+          return
+        }
+
+        if (this.isFileAppLocalType(Number(msg.localType || 0)) || this.hasFileAppMessageHints(msg)) {
+          const rowFileHints = this.getFileAppMessageHints(row)
+          const fileMeta = this.extractFileAppMessageMeta(content)
+          const mergedFileMeta = {
+            xmlType: fileMeta?.xmlType || rowFileHints.xmlType,
+            fileName: fileMeta?.fileName || rowFileHints.fileName,
+            fileSize: fileMeta?.fileSize || rowFileHints.fileSize,
+            fileExt: fileMeta?.fileExt || rowFileHints.fileExt,
+            fileMd5: fileMeta?.fileMd5 || rowFileHints.fileMd5
+          }
+          if (mergedFileMeta.xmlType) msg.xmlType = mergedFileMeta.xmlType
+          if (mergedFileMeta.fileName) msg.fileName = mergedFileMeta.fileName
+          if (mergedFileMeta.fileSize) msg.fileSize = mergedFileMeta.fileSize
+          if (mergedFileMeta.fileExt) msg.fileExt = mergedFileMeta.fileExt
+          if (mergedFileMeta.fileMd5) msg.fileMd5 = mergedFileMeta.fileMd5
         }
       } catch (error) {
         // 详情补取失败时保持降级导出（占位符），避免中断整批任务。
@@ -5271,7 +6100,7 @@ class ExportService {
 
       // 如果没有消息,不创建文件
       if (totalMessages === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
 
       await this.hydrateEmojiCaptionsForMessages(sessionId, allMessages, control)
@@ -5324,24 +6153,16 @@ class ExportService {
         }
       }
 
-      allMessages.sort((a, b) => a.createTime - b.createTime)
+      const allMessagesInCursorOrder = allMessages
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
 
       // ========== 阶段1：并行导出媒体文件 ==========
-      const mediaMessages = exportMediaEnabled
-        ? allMessages.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||   // 图片
-            (t === 47 && options.exportEmojis) ||  // 表情
-            (t === 43 && options.exportVideos) ||  // 视频
-            (t === 34 && options.exportVoices) ||  // 语音文件
-            ((t === 49 || t === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6')
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(allMessagesInCursorOrder, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -5360,7 +6181,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -5394,12 +6215,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       // ========== 阶段2：并行语音转文字 ==========
       const voiceTranscriptMap = new Map<string, string>()
@@ -5809,7 +6632,7 @@ class ExportService {
 
       // 如果没有消息,不创建文件
       if (totalMessages === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
 
       await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
@@ -5840,19 +6663,11 @@ class ExportService {
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
 
       // ========== 阶段1：并行导出媒体文件 ==========
-      const mediaMessages = exportMediaEnabled
-        ? collected.rows.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||
-            (t === 47 && options.exportEmojis) ||
-            (t === 43 && options.exportVideos) ||
-            (t === 34 && options.exportVoices) ||
-            ((t === 49 || t === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6')
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(collected.rows, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -5871,7 +6686,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -5904,12 +6719,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       // ========== 阶段2：并行语音转文字 ==========
       const voiceTranscriptMap = new Map<string, string>()
@@ -6545,7 +7362,7 @@ class ExportService {
 
       // 如果没有消息,不创建文件
       if (totalMessages === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
 
       await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
@@ -6705,25 +7522,17 @@ class ExportService {
 
 
       // 填充数据
-      const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
+      const sortedMessages = collected.rows
 
       // 媒体导出设置
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
 
       // ========== 并行预处理：媒体文件 ==========
-      const mediaMessages = exportMediaEnabled
-        ? sortedMessages.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||
-            (t === 47 && options.exportEmojis) ||
-            (t === 43 && options.exportVideos) ||
-            (t === 34 && options.exportVoices) ||
-            ((t === 49 || t === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6')
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -6742,7 +7551,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -6775,12 +7584,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       // ========== 并行预处理：语音转文字 ==========
       const voiceTranscriptMap = new Map<string, string>()
@@ -7421,7 +8232,7 @@ class ExportService {
 
       // 如果没有消息,不创建文件
       if (totalMessages === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
 
       await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
@@ -7458,22 +8269,14 @@ class ExportService {
         ? await this.getGroupNicknamesForRoom(sessionId, groupNicknameCandidates)
         : new Map<string, string>()
 
-      const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
+      const sortedMessages = collected.rows
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
-      const mediaMessages = exportMediaEnabled
-        ? sortedMessages.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||
-            (t === 47 && options.exportEmojis) ||
-            (t === 43 && options.exportVideos) ||
-            (t === 34 && options.exportVoices) ||
-            ((t === 49 || t === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6')
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -7492,7 +8295,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -7525,12 +8328,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       const voiceTranscriptMap = new Map<string, string>()
 
@@ -7577,7 +8382,24 @@ class ExportService {
         exportedMessages: 0
       })
 
-      const lines: string[] = []
+      const stream = fs.createWriteStream(outputPath, { encoding: 'utf-8' })
+      const writeChunk = async (chunk: string): Promise<void> => {
+        await new Promise<void>((resolve, _reject) => {
+          this.throwIfStopRequested(control)
+          if (!stream.write(chunk)) {
+            stream.once('drain', resolve)
+          } else {
+            resolve()
+          }
+        })
+      }
+      const WRITE_BATCH = 120
+      let writeBuffer: string[] = []
+      const flushWriteBuffer = async (): Promise<void> => {
+        if (writeBuffer.length === 0) return
+        await writeChunk(writeBuffer.join(''))
+        writeBuffer = []
+      }
       const senderProfileCache = new Map<string, ExportDisplayProfile>()
 
       for (let i = 0; i < totalMessages; i++) {
@@ -7692,9 +8514,10 @@ class ExportService {
           }
         }
 
-        lines.push(`${this.formatTimestamp(msg.createTime)} '${senderRole}'`)
-        lines.push(enrichedContentValue)
-        lines.push('')
+        writeBuffer.push(`${this.formatTimestamp(msg.createTime)} '${senderRole}'\n${enrichedContentValue}\n\n`)
+        if (writeBuffer.length >= WRITE_BATCH) {
+          await flushWriteBuffer()
+        }
 
         if ((i + 1) % 200 === 0) {
           const progress = 60 + Math.floor((i + 1) / sortedMessages.length * 30)
@@ -7710,6 +8533,8 @@ class ExportService {
         }
       }
 
+      await flushWriteBuffer()
+
       onProgress?.({
         current: 92,
         total: 100,
@@ -7721,7 +8546,10 @@ class ExportService {
       })
 
       this.throwIfStopRequested(control)
-      await fs.promises.writeFile(outputPath, lines.join('\n'), 'utf-8')
+      await new Promise<void>((resolve, reject) => {
+        stream.on('error', reject)
+        stream.end(() => resolve())
+      })
 
       onProgress?.({
         current: 100,
@@ -7795,7 +8623,7 @@ class ExportService {
       )
       let totalMessages = collected.rows.length
       if (totalMessages === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
 
       await this.hydrateEmojiCaptionsForMessages(sessionId, collected.rows, control)
@@ -7824,7 +8652,6 @@ class ExportService {
         : new Map<string, string>()
 
       const sortedMessages = collected.rows
-        .sort((a, b) => a.createTime - b.createTime)
         .filter((msg) => !this.isQuotedReplyMessage(msg.localType, msg.content || ''))
       totalMessages = sortedMessages.length
       if (totalMessages === 0) {
@@ -7840,19 +8667,11 @@ class ExportService {
       }
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
-      const mediaMessages = exportMediaEnabled
-        ? sortedMessages.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||
-            (t === 47 && options.exportEmojis) ||
-            (t === 43 && options.exportVideos) ||
-            (t === 34 && options.exportVoices) ||
-            ((t === 49 || t === 8589934592049) && options.exportFiles && String(msg?.xmlType || '') === '6')
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -7871,7 +8690,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -7904,12 +8723,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       const voiceTranscriptMap = new Map<string, string>()
 
@@ -7956,8 +8777,25 @@ class ExportService {
         exportedMessages: 0
       })
 
-      const lines: string[] = []
-      lines.push('id,MsgSvrID,type_name,is_sender,talker,msg,src,CreateTime')
+      const stream = fs.createWriteStream(outputPath, { encoding: 'utf-8' })
+      const writeChunk = async (chunk: string): Promise<void> => {
+        await new Promise<void>((resolve, _reject) => {
+          this.throwIfStopRequested(control)
+          if (!stream.write(chunk)) {
+            stream.once('drain', resolve)
+          } else {
+            resolve()
+          }
+        })
+      }
+      const WRITE_BATCH = 160
+      let writeBuffer: string[] = []
+      const flushWriteBuffer = async (): Promise<void> => {
+        if (writeBuffer.length === 0) return
+        await writeChunk(writeBuffer.join(''))
+        writeBuffer = []
+      }
+      await writeChunk('\uFEFFid,MsgSvrID,type_name,is_sender,talker,msg,src,CreateTime\r\n')
       const senderProfileCache = new Map<string, ExportDisplayProfile>()
 
       for (let i = 0; i < totalMessages; i++) {
@@ -8038,7 +8876,10 @@ class ExportService {
           this.formatIsoTimestamp(msg.createTime)
         ]
 
-        lines.push(row.map((value) => this.escapeCsvCell(value)).join(','))
+        writeBuffer.push(`${row.map((value) => this.escapeCsvCell(value)).join(',')}\r\n`)
+        if (writeBuffer.length >= WRITE_BATCH) {
+          await flushWriteBuffer()
+        }
 
         if ((i + 1) % 200 === 0) {
           const progress = 60 + Math.floor((i + 1) / sortedMessages.length * 30)
@@ -8054,6 +8895,8 @@ class ExportService {
         }
       }
 
+      await flushWriteBuffer()
+
       onProgress?.({
         current: 92,
         total: 100,
@@ -8065,7 +8908,10 @@ class ExportService {
       })
 
       this.throwIfStopRequested(control)
-      await fs.promises.writeFile(outputPath, `\uFEFF${lines.join('\r\n')}`, 'utf-8')
+      await new Promise<void>((resolve, reject) => {
+        stream.on('error', reject)
+        stream.end(() => resolve())
+      })
 
       onProgress?.({
         current: 100,
@@ -8227,7 +9073,7 @@ class ExportService {
 
       // 如果没有消息,不创建文件
       if (collected.rows.length === 0) {
-        return { success: false, error: '该会话在指定时间范围内没有消息' }
+        return { success: false, error: collected.error || '该会话在指定时间范围内没有消息' }
       }
       const totalMessages = collected.rows.length
 
@@ -8260,21 +9106,14 @@ class ExportService {
         this.throwIfStopRequested(control)
         await this.mergeGroupMembers(sessionId, collected.memberSet, options.exportAvatars === true)
       }
-      const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
+      const sortedMessages = collected.rows
 
       const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
-      const mediaMessages = exportMediaEnabled
-        ? sortedMessages.filter(msg => {
-          const t = msg.localType
-          return (t === 3 && options.exportImages) ||
-            (t === 47 && options.exportEmojis) ||
-            (t === 34 && options.exportVoices) ||
-            (t === 43 && options.exportVideos)
-        })
-        : []
+      const mediaMessages = this.collectMediaMessagesForExport(sortedMessages, options)
 
       const mediaCache = new Map<string, MediaExportItem | null>()
       const mediaDirCache = new Set<string>()
+      const beforeMediaDoneFiles = this.getMediaDoneFilesCount()
 
       if (mediaMessages.length > 0) {
         await this.preloadMediaLookupCaches(sessionId, mediaMessages, {
@@ -8293,7 +9132,7 @@ class ExportService {
           phase: 'exporting-media',
           phaseProgress: 0,
           phaseTotal: mediaMessages.length,
-          phaseLabel: `导出媒体 0/${mediaMessages.length}`,
+          phaseLabel: this.formatMediaPhaseLabel(0, mediaMessages.length, beforeMediaDoneFiles),
           ...this.getMediaTelemetrySnapshot(),
           estimatedTotalMessages: totalMessages
         })
@@ -8327,12 +9166,14 @@ class ExportService {
               phase: 'exporting-media',
               phaseProgress: mediaExported,
               phaseTotal: mediaMessages.length,
-              phaseLabel: `导出媒体 ${mediaExported}/${mediaMessages.length}`,
+              phaseLabel: this.formatMediaPhaseLabel(mediaExported, mediaMessages.length, beforeMediaDoneFiles),
               ...this.getMediaTelemetrySnapshot()
             })
           }
         })
       }
+      const fileOnlyExportFailure = this.buildFileOnlyExportFailure(options, mediaMessages, beforeMediaDoneFiles)
+      if (fileOnlyExportFailure) return fileOnlyExportFailure
 
       const useVoiceTranscript = options.exportVoiceAsText === true
       const voiceMessages = useVoiceTranscript
@@ -9051,7 +9892,7 @@ class ExportService {
         : options
 
       const exportMediaEnabled = effectiveOptions.exportMedia === true &&
-        Boolean(effectiveOptions.exportImages || effectiveOptions.exportVoices || effectiveOptions.exportVideos || effectiveOptions.exportEmojis)
+        Boolean(effectiveOptions.exportImages || effectiveOptions.exportVoices || effectiveOptions.exportVideos || effectiveOptions.exportEmojis || effectiveOptions.exportFiles)
       attachMediaTelemetry = exportMediaEnabled
       if (exportMediaEnabled) {
         this.triggerMediaFileCacheCleanup()

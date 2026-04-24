@@ -1915,14 +1915,14 @@
   --contacts-select-col-width: 34px;
   --contacts-avatar-col-width: 44px;
   --contacts-inline-padding: 12px;
-  --contacts-column-gap: 12px;
-  --contacts-name-text-width: 10em;
+  --contacts-column-gap: 10px;
+  --contacts-name-text-width: 9.5em;
   --contacts-main-col-width: calc(var(--contacts-avatar-col-width) + var(--contacts-column-gap) + var(--contacts-name-text-width));
   --contacts-left-sticky-width: calc(var(--contacts-select-col-width) + var(--contacts-main-col-width) + var(--contacts-column-gap));
-  --contacts-message-col-width: 120px;
-  --contacts-media-col-width: 72px;
+  --contacts-message-col-width: 104px;
+  --contacts-media-col-width: 66px;
   --contacts-action-col-width: 140px;
-  --contacts-actions-sticky-width: 240px;
+  --contacts-actions-sticky-width: 180px;
   --contacts-table-min-width: 1240px;
   overflow: hidden;
   border: none;
@@ -2197,22 +2197,8 @@
     gap: 10px;
     flex-wrap: nowrap;
     flex-shrink: 0;
-    position: sticky;
-    right: 0;
-    z-index: 13;
     background: var(--contacts-header-bg);
     white-space: nowrap;
-
-    &::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      left: -8px;
-      width: 8px;
-      pointer-events: none;
-      background: linear-gradient(to right, transparent, var(--contacts-header-bg));
-    }
   }
 
   .contacts-list {
@@ -2396,7 +2382,7 @@
     display: flex;
     align-items: center;
     gap: var(--contacts-column-gap);
-    padding: 12px 6px 12px var(--contacts-inline-padding);
+    padding: 12px var(--contacts-inline-padding);
     min-width: max(100%, var(--contacts-table-min-width));
     height: 72px;
     box-sizing: border-box;
@@ -2801,21 +2787,7 @@
   width: var(--contacts-actions-sticky-width);
   min-width: var(--contacts-actions-sticky-width);
   flex-shrink: 0;
-  position: sticky;
-  right: 0;
-  z-index: 10;
   background: var(--contacts-row-bg);
-
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: -9px;
-    width: 9px;
-    pointer-events: none;
-    background: linear-gradient(to right, transparent, var(--contacts-row-bg));
-  }
 
   .row-action-main {
     display: inline-flex;

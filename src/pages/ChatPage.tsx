@@ -72,10 +72,145 @@ const GLOBAL_MSG_SEARCH_CANCELED_ERROR = '__WEFLOW_GLOBAL_MSG_SEARCH_CANCELED__'
 const GLOBAL_MSG_SHADOW_COMPARE_SAMPLE_RATE = 0.2
 const GLOBAL_MSG_SHADOW_COMPARE_STORAGE_KEY = 'weflow.debug.searchShadowCompare'
 const MESSAGE_LIST_SCROLL_IDLE_MS = 160
-const MESSAGE_TOP_WHEEL_LOAD_COOLDOWN_MS = 160
+const MESSAGE_TOP_EDGE_LOAD_COOLDOWN_MS = 160
 const MESSAGE_EDGE_TRIGGER_DISTANCE_PX = 96
+const MESSAGE_HISTORY_INITIAL_LIMIT = 50
+const MESSAGE_HISTORY_HEAVY_UNREAD_INITIAL_LIMIT = 70
+const MESSAGE_HISTORY_GROWTH_STEP = 20
+const MESSAGE_HISTORY_MAX_LIMIT = 180
+const MESSAGE_VIRTUAL_OVERSCAN_PX = 140
+const BYTES_PER_MEGABYTE = 1024 * 1024
+const EMOJI_CACHE_MAX_ENTRIES = 260
+const EMOJI_CACHE_MAX_BYTES = 32 * BYTES_PER_MEGABYTE
+const IMAGE_CACHE_MAX_ENTRIES = 360
+const IMAGE_CACHE_MAX_BYTES = 64 * BYTES_PER_MEGABYTE
+const VOICE_CACHE_MAX_ENTRIES = 120
+const VOICE_CACHE_MAX_BYTES = 24 * BYTES_PER_MEGABYTE
+const VOICE_TRANSCRIPT_CACHE_MAX_ENTRIES = 1800
+const VOICE_TRANSCRIPT_CACHE_MAX_BYTES = 2 * BYTES_PER_MEGABYTE
+const SENDER_AVATAR_CACHE_MAX_ENTRIES = 2000
+const AUTO_MEDIA_TASK_MAX_CONCURRENCY = 2
+const AUTO_MEDIA_TASK_MAX_QUEUE = 80
 
 type RequestIdleCallbackCompat = (callback: () => void, options?: { timeout?: number }) => number
+
+type BoundedCacheOptions<V> = {
+  maxEntries: number
+  maxBytes?: number
+  estimate?: (value: V) => number
+}
+
+type BoundedCache<V> = {
+  get: (key: string) => V | undefined
+  set: (key: string, value: V) => void
+  has: (key: string) => boolean
+  delete: (key: string) => boolean
+  clear: () => void
+  readonly size: number
+}
+
+function estimateStringBytes(value: string): number {
+  return Math.max(0, value.length * 2)
+}
+
+function createBoundedCache<V>(options: BoundedCacheOptions<V>): BoundedCache<V> {
+  const { maxEntries, maxBytes, estimate } = options
+  const storage = new Map<string, V>()
+  const valueSizes = new Map<string, number>()
+  let currentBytes = 0
+
+  const estimateSize = (value: V): number => {
+    if (!estimate) return 1
+    const raw = estimate(value)
+    if (!Number.isFinite(raw) || raw <= 0) return 1
+    return Math.max(1, Math.round(raw))
+  }
+
+  const removeKey = (key: string): boolean => {
+    if (!storage.has(key)) return false
+    const previousSize = valueSizes.get(key) || 0
+    currentBytes = Math.max(0, currentBytes - previousSize)
+    valueSizes.delete(key)
+    return storage.delete(key)
+  }
+
+  const touch = (key: string, value: V) => {
+    storage.delete(key)
+    storage.set(key, value)
+  }
+
+  const prune = () => {
+    const shouldPruneByBytes = Number.isFinite(maxBytes) && (maxBytes as number) > 0
+    while (storage.size > maxEntries || (shouldPruneByBytes && currentBytes > (maxBytes as number))) {
+      const oldestKey = storage.keys().next().value as string | undefined
+      if (!oldestKey) break
+      removeKey(oldestKey)
+    }
+  }
+
+  return {
+    get(key: string) {
+      const value = storage.get(key)
+      if (value === undefined) return undefined
+      touch(key, value)
+      return value
+    },
+    set(key: string, value: V) {
+      const nextSize = estimateSize(value)
+      if (storage.has(key)) {
+        const previousSize = valueSizes.get(key) || 0
+        currentBytes = Math.max(0, currentBytes - previousSize)
+      }
+      storage.set(key, value)
+      valueSizes.set(key, nextSize)
+      currentBytes += nextSize
+      prune()
+    },
+    has(key: string) {
+      return storage.has(key)
+    },
+    delete(key: string) {
+      return removeKey(key)
+    },
+    clear() {
+      storage.clear()
+      valueSizes.clear()
+      currentBytes = 0
+    },
+    get size() {
+      return storage.size
+    }
+  }
+}
+
+const autoMediaTaskQueue: Array<() => void> = []
+let autoMediaTaskRunningCount = 0
+
+function enqueueAutoMediaTask<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const runTask = () => {
+      autoMediaTaskRunningCount += 1
+      task()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          autoMediaTaskRunningCount = Math.max(0, autoMediaTaskRunningCount - 1)
+          const next = autoMediaTaskQueue.shift()
+          if (next) next()
+        })
+    }
+
+    if (autoMediaTaskRunningCount < AUTO_MEDIA_TASK_MAX_CONCURRENCY) {
+      runTask()
+      return
+    }
+    if (autoMediaTaskQueue.length >= AUTO_MEDIA_TASK_MAX_QUEUE) {
+      reject(new Error('AUTO_MEDIA_TASK_QUEUE_FULL'))
+      return
+    }
+    autoMediaTaskQueue.push(runTask)
+  })
+}
 
 function scheduleWhenIdle(task: () => void, options?: { timeout?: number; fallbackDelay?: number }): void {
   const requestIdleCallbackFn = (
@@ -1293,7 +1428,7 @@ function ChatPage(props: ChatPageProps) {
 
   const getMessageKey = useCallback((msg: Message): string => {
     if (msg.messageKey) return msg.messageKey
-    return `fallback:${msg.serverId || 0}:${msg.createTime}:${msg.sortSeq || 0}:${msg.localId || 0}:${msg.senderUsername || ''}:${msg.localType || 0}`
+    return `fallback:${msg._db_path || ''}:${msg.serverId || 0}:${msg.createTime}:${msg.sortSeq || 0}:${msg.localId || 0}:${msg.senderUsername || ''}:${msg.localType || 0}`
   }, [])
   const initialRevealTimerRef = useRef<number | null>(null)
   const sessionListRef = useRef<HTMLDivElement>(null)
@@ -1473,6 +1608,7 @@ function ChatPage(props: ChatPageProps) {
   const searchKeywordRef = useRef('')
   const preloadImageKeysRef = useRef<Set<string>>(new Set())
   const lastPreloadSessionRef = useRef<string | null>(null)
+  const messageMediaPreloadTimerRef = useRef<number | null>(null)
   const detailRequestSeqRef = useRef(0)
   const groupMembersRequestSeqRef = useRef(0)
   const groupMembersPanelCacheRef = useRef<Map<string, GroupMembersPanelCacheEntry>>(new Map())
@@ -2793,6 +2929,11 @@ function ChatPage(props: ChatPageProps) {
   }, [loadMyAvatar, resolveChatCacheScope])
 
   const handleAccountChanged = useCallback(async () => {
+    emojiDataUrlCache.clear()
+    imageDataUrlCache.clear()
+    voiceDataUrlCache.clear()
+    voiceTranscriptCache.clear()
+    imageDecryptInFlight.clear()
     senderAvatarCache.clear()
     senderAvatarLoading.clear()
     quotedSenderDisplayCache.clear()
@@ -2804,6 +2945,10 @@ function ChatPage(props: ChatPageProps) {
     sessionContactEnrichAttemptAtRef.current.clear()
     preloadImageKeysRef.current.clear()
     lastPreloadSessionRef.current = null
+    if (messageMediaPreloadTimerRef.current !== null) {
+      window.clearTimeout(messageMediaPreloadTimerRef.current)
+      messageMediaPreloadTimerRef.current = null
+    }
     pendingSessionLoadRef.current = null
     initialLoadRequestedSessionRef.current = null
     sessionSwitchRequestSeqRef.current += 1
@@ -3321,8 +3466,8 @@ function ChatPage(props: ChatPageProps) {
       setIsRefreshingMessages(false)
     }
   }
-  // 消息批量大小控制（保持稳定，避免游标反复重建）
-  const currentBatchSizeRef = useRef(50)
+  // 消息批量大小控制（会话内逐步增大，减少频繁触顶加载）
+  const currentBatchSizeRef = useRef(MESSAGE_HISTORY_INITIAL_LIMIT)
 
   const warmupGroupSenderProfiles = useCallback((usernames: string[], defer = false) => {
     if (!Array.isArray(usernames) || usernames.length === 0) return
@@ -3386,14 +3531,21 @@ function ChatPage(props: ChatPageProps) {
     let messageLimit: number
 
     if (offset === 0) {
+      const defaultInitialLimit = unreadCount > 99
+        ? MESSAGE_HISTORY_HEAVY_UNREAD_INITIAL_LIMIT
+        : MESSAGE_HISTORY_INITIAL_LIMIT
       const preferredLimit = Number.isFinite(options.forceInitialLimit)
         ? Math.max(10, Math.floor(options.forceInitialLimit as number))
-        : (unreadCount > 99 ? 30 : 40)
-      currentBatchSizeRef.current = preferredLimit
-      messageLimit = preferredLimit
-    } else {
-      // 同一会话内保持固定批量，避免后端游标因 batch 改变而重建
+        : defaultInitialLimit
+      currentBatchSizeRef.current = Math.min(preferredLimit, MESSAGE_HISTORY_MAX_LIMIT)
       messageLimit = currentBatchSizeRef.current
+    } else {
+      const grownBatchSize = Math.min(
+        Math.max(currentBatchSizeRef.current, MESSAGE_HISTORY_INITIAL_LIMIT) + MESSAGE_HISTORY_GROWTH_STEP,
+        MESSAGE_HISTORY_MAX_LIMIT
+      )
+      currentBatchSizeRef.current = grownBatchSize
+      messageLimit = grownBatchSize
     }
 
 
@@ -3445,10 +3597,10 @@ function ChatPage(props: ChatPageProps) {
       if (result.success && result.messages) {
         const resultMessages = result.messages
         if (offset === 0) {
+          setNoMessageTable(false)
           setMessages(resultMessages)
           persistSessionPreviewCache(sessionId, resultMessages)
           if (resultMessages.length === 0) {
-            setNoMessageTable(true)
             setHasMoreMessages(false)
           }
 
@@ -3549,7 +3701,10 @@ function ChatPage(props: ChatPageProps) {
           : offset + resultMessages.length
         setCurrentOffset(nextOffset)
       } else if (!result.success) {
-        setNoMessageTable(true)
+        const errorText = String(result.error || '')
+        const shouldMarkNoTable =
+          /schema mismatch|no message db|no table|消息数据库未找到|消息表|message schema/i.test(errorText)
+        setNoMessageTable(shouldMarkNoTable)
         setHasMoreMessages(false)
       }
     } catch (e) {
@@ -3557,6 +3712,7 @@ function ChatPage(props: ChatPageProps) {
       setConnectionError('加载消息失败')
       setHasMoreMessages(false)
       if (offset === 0 && currentSessionRef.current === sessionId) {
+        setNoMessageTable(false)
         setMessages([])
       }
     } finally {
@@ -4095,7 +4251,7 @@ function ChatPage(props: ChatPageProps) {
       void loadMessages(normalizedSessionId, 0, 0, 0, false, {
         preferLatestPath: true,
         deferGroupSenderWarmup: true,
-        forceInitialLimit: 30,
+        forceInitialLimit: MESSAGE_HISTORY_INITIAL_LIMIT,
         switchRequestSeq
       })
     }
@@ -4586,24 +4742,40 @@ function ChatPage(props: ChatPageProps) {
     setShowScrollToBottom(prev => (prev === shouldShow ? prev : shouldShow))
   }, [messages.length, isLoadingMessages, isLoadingMore, isSessionSwitching])
 
+  const triggerTopEdgeHistoryLoad = useCallback((): boolean => {
+    if (!currentSessionId || isLoadingMore || isLoadingMessages || !hasMoreMessages) return false
+    const listEl = messageListRef.current
+    if (!listEl) return false
+    const distanceFromTop = Math.max(0, listEl.scrollTop)
+    if (distanceFromTop > MESSAGE_EDGE_TRIGGER_DISTANCE_PX) return false
+    if (topRangeLoadLockRef.current) return false
+    const now = Date.now()
+    if (now - topRangeLoadLastTriggerAtRef.current < MESSAGE_TOP_EDGE_LOAD_COOLDOWN_MS) return false
+    topRangeLoadLastTriggerAtRef.current = now
+    topRangeLoadLockRef.current = true
+    isMessageListAtBottomRef.current = false
+    void loadMessages(currentSessionId, currentOffset, jumpStartTime, jumpEndTime)
+    return true
+  }, [
+    currentSessionId,
+    isLoadingMore,
+    isLoadingMessages,
+    hasMoreMessages,
+    loadMessages,
+    currentOffset,
+    jumpStartTime,
+    jumpEndTime
+  ])
+
   const handleMessageListWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
     markMessageListScrolling()
     if (!currentSessionId || isLoadingMore || isLoadingMessages) return
     const listEl = messageListRef.current
     if (!listEl) return
-    const distanceFromTop = listEl.scrollTop
     const distanceFromBottom = listEl.scrollHeight - (listEl.scrollTop + listEl.clientHeight)
 
     if (event.deltaY <= -18) {
-      if (!hasMoreMessages) return
-      if (distanceFromTop > MESSAGE_EDGE_TRIGGER_DISTANCE_PX) return
-      if (topRangeLoadLockRef.current) return
-      const now = Date.now()
-      if (now - topRangeLoadLastTriggerAtRef.current < MESSAGE_TOP_WHEEL_LOAD_COOLDOWN_MS) return
-      topRangeLoadLastTriggerAtRef.current = now
-      topRangeLoadLockRef.current = true
-      isMessageListAtBottomRef.current = false
-      void loadMessages(currentSessionId, currentOffset, jumpStartTime, jumpEndTime)
+      triggerTopEdgeHistoryLoad()
       return
     }
 
@@ -4619,22 +4791,21 @@ function ChatPage(props: ChatPageProps) {
   }, [
     currentSessionId,
     hasMoreLater,
-    hasMoreMessages,
     isLoadingMessages,
     isLoadingMore,
-    currentOffset,
-    jumpStartTime,
-    jumpEndTime,
     markMessageListScrolling,
-    loadMessages,
-    loadLaterMessages
+    loadLaterMessages,
+    triggerTopEdgeHistoryLoad
   ])
 
   const handleMessageAtTopStateChange = useCallback((atTop: boolean) => {
     if (!atTop) {
       topRangeLoadLockRef.current = false
+      return
     }
-  }, [])
+    // 支持拖动右侧滚动条到顶部时直接触发加载，不依赖滚轮事件。
+    triggerTopEdgeHistoryLoad()
+  }, [triggerTopEdgeHistoryLoad])
 
 
   const isSameSession = useCallback((prev: ChatSession, next: ChatSession): boolean => {
@@ -4787,6 +4958,10 @@ function ChatPage(props: ChatPageProps) {
         window.clearTimeout(messageListScrollTimeoutRef.current)
         messageListScrollTimeoutRef.current = null
       }
+      if (messageMediaPreloadTimerRef.current !== null) {
+        window.clearTimeout(messageMediaPreloadTimerRef.current)
+        messageMediaPreloadTimerRef.current = null
+      }
       isMessageListScrollingRef.current = false
       contactUpdateQueueRef.current.clear()
       pendingSessionContactEnrichRef.current.clear()
@@ -4857,36 +5032,54 @@ function ChatPage(props: ChatPageProps) {
   }, [currentSessionId])
 
   useEffect(() => {
-    if (!currentSessionId || messages.length === 0) return
-    const preloadEdgeCount = 40
-    const maxPreload = 30
-    const head = messages.slice(0, preloadEdgeCount)
-    const tail = messages.slice(-preloadEdgeCount)
-    const candidates = [...head, ...tail]
-    const queued = preloadImageKeysRef.current
-    const seen = new Set<string>()
-    const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
-    for (const msg of candidates) {
-      if (payloads.length >= maxPreload) break
-      if (msg.localType !== 3) continue
-      const cacheKey = msg.imageMd5 || msg.imageDatName || `local:${msg.localId}`
-      if (!msg.imageMd5 && !msg.imageDatName) continue
-      if (imageDataUrlCache.has(cacheKey)) continue
-      const taskKey = `${currentSessionId}|${cacheKey}`
-      if (queued.has(taskKey) || seen.has(taskKey)) continue
-      queued.add(taskKey)
-      seen.add(taskKey)
-      payloads.push({
-        sessionId: currentSessionId,
-        imageMd5: msg.imageMd5 || undefined,
-        imageDatName: msg.imageDatName,
-        createTime: msg.createTime
-      })
+    if (messageMediaPreloadTimerRef.current !== null) {
+      window.clearTimeout(messageMediaPreloadTimerRef.current)
+      messageMediaPreloadTimerRef.current = null
     }
-    if (payloads.length > 0) {
-      window.electronAPI.image.preload(payloads, {
-        allowCacheIndex: false
-      }).catch(() => { })
+    if (!currentSessionId || messages.length === 0) return
+
+    messageMediaPreloadTimerRef.current = window.setTimeout(() => {
+      messageMediaPreloadTimerRef.current = null
+      scheduleWhenIdle(() => {
+        if (isMessageListScrollingRef.current) return
+        const preloadEdgeCount = 20
+        const maxPreload = 12
+        const head = messages.slice(0, preloadEdgeCount)
+        const tail = messages.slice(-preloadEdgeCount)
+        const candidates = [...head, ...tail]
+        const queued = preloadImageKeysRef.current
+        const seen = new Set<string>()
+        const payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string; createTime?: number }> = []
+        for (const msg of candidates) {
+          if (payloads.length >= maxPreload) break
+          if (msg.localType !== 3) continue
+          const cacheKey = msg.imageMd5 || msg.imageDatName || `local:${msg.localId}`
+          if (!msg.imageMd5 && !msg.imageDatName) continue
+          if (imageDataUrlCache.has(cacheKey)) continue
+          const taskKey = `${currentSessionId}|${cacheKey}`
+          if (queued.has(taskKey) || seen.has(taskKey)) continue
+          queued.add(taskKey)
+          seen.add(taskKey)
+          payloads.push({
+            sessionId: currentSessionId,
+            imageMd5: msg.imageMd5 || undefined,
+            imageDatName: msg.imageDatName,
+            createTime: msg.createTime
+          })
+        }
+        if (payloads.length > 0) {
+          window.electronAPI.image.preload(payloads, {
+            allowCacheIndex: false
+          }).catch(() => { })
+        }
+      }, { timeout: 1400, fallbackDelay: 120 })
+    }, 120)
+
+    return () => {
+      if (messageMediaPreloadTimerRef.current !== null) {
+        window.clearTimeout(messageMediaPreloadTimerRef.current)
+        messageMediaPreloadTimerRef.current = null
+      }
     }
   }, [currentSessionId, messages])
 
@@ -4983,7 +5176,7 @@ function ChatPage(props: ChatPageProps) {
       void loadMessages(currentSessionId, 0, 0, 0, false, {
         preferLatestPath: true,
         deferGroupSenderWarmup: true,
-        forceInitialLimit: 30
+        forceInitialLimit: MESSAGE_HISTORY_INITIAL_LIMIT
       })
     }
   }, [currentSessionId, isConnected, messages.length, isLoadingMessages, isLoadingMore, noMessageTable])
@@ -5116,6 +5309,18 @@ function ChatPage(props: ChatPageProps) {
       return []
     }
 
+    const getSessionSortTime = (session: Pick<ChatSession, 'sortTimestamp' | 'lastTimestamp'>) =>
+      Number(session.sortTimestamp || session.lastTimestamp || 0)
+    const insertSessionByTimeDesc = (list: ChatSession[], entry: ChatSession) => {
+      const entryTime = getSessionSortTime(entry)
+      const insertIndex = list.findIndex(s => getSessionSortTime(s) < entryTime)
+      if (insertIndex === -1) {
+        list.push(entry)
+      } else {
+        list.splice(insertIndex, 0, entry)
+      }
+    }
+
     const officialSessions = sessions.filter(s => s.username.startsWith('gh_'))
 
     // 检查是否有折叠的群聊
@@ -5130,11 +5335,12 @@ function ChatPage(props: ChatPageProps) {
 
     const latestOfficial = officialSessions.reduce<ChatSession | null>((latest, current) => {
       if (!latest) return current
-      const latestTime = latest.sortTimestamp || latest.lastTimestamp
-      const currentTime = current.sortTimestamp || current.lastTimestamp
+      const latestTime = getSessionSortTime(latest)
+      const currentTime = getSessionSortTime(current)
       return currentTime > latestTime ? current : latest
     }, null)
     const officialUnreadCount = officialSessions.reduce((sum, s) => sum + (s.unreadCount || 0), 0)
+    const officialLatestTime = latestOfficial ? getSessionSortTime(latestOfficial) : 0
 
     const bizEntry: ChatSession = {
       username: OFFICIAL_ACCOUNTS_VIRTUAL_ID,
@@ -5143,8 +5349,8 @@ function ChatPage(props: ChatPageProps) {
         ? `${latestOfficial.displayName || latestOfficial.username}: ${latestOfficial.summary || '查看公众号历史消息'}`
         : '查看公众号历史消息',
       type: 0,
-      sortTimestamp: 9999999999,  // 放到最前面？  目前还没有严格的对时间进行排序，  后面可以改一下
-      lastTimestamp: latestOfficial?.lastTimestamp || latestOfficial?.sortTimestamp || 0,
+      sortTimestamp: officialLatestTime,
+      lastTimestamp: officialLatestTime,
       lastMsgType: latestOfficial?.lastMsgType || 0,
       unreadCount: officialUnreadCount,
       isMuted: false,
@@ -5152,7 +5358,7 @@ function ChatPage(props: ChatPageProps) {
     }
 
     if (!visible.some(s => s.username === OFFICIAL_ACCOUNTS_VIRTUAL_ID)) {
-      visible.unshift(bizEntry)
+      insertSessionByTimeDesc(visible, bizEntry)
     }
 
     if (hasFoldedGroups && !visible.some(s => s.username.toLowerCase().includes('placeholder_foldgroup'))) {
@@ -5176,17 +5382,7 @@ function ChatPage(props: ChatPageProps) {
         isFolded: false
       }
 
-      // 按时间戳插入到正确位置
-      const foldTime = foldEntry.sortTimestamp || foldEntry.lastTimestamp
-      const insertIndex = visible.findIndex(s => {
-        const sTime = s.sortTimestamp || s.lastTimestamp
-        return sTime < foldTime
-      })
-      if (insertIndex === -1) {
-        visible.push(foldEntry)
-      } else {
-        visible.splice(insertIndex, 0, foldEntry)
-      }
+      insertSessionByTimeDesc(visible, foldEntry)
     }
 
     if (!searchKeyword.trim()) {
@@ -7084,7 +7280,7 @@ function ChatPage(props: ChatPageProps) {
                     className="message-virtuoso"
                     customScrollParent={messageListScrollParent ?? undefined}
                     data={messages}
-                    overscan={220}
+                    overscan={MESSAGE_VIRTUAL_OVERSCAN_PX}
                     followOutput={(atBottom) => (
                       prependingHistoryRef.current
                         ? false
@@ -8028,10 +8224,26 @@ const globalVoiceManager = {
 }
 
 // 前端表情包缓存
-const emojiDataUrlCache = new Map<string, string>()
-const imageDataUrlCache = new Map<string, string>()
-const voiceDataUrlCache = new Map<string, string>()
-const voiceTranscriptCache = new Map<string, string>()
+const emojiDataUrlCache = createBoundedCache<string>({
+  maxEntries: EMOJI_CACHE_MAX_ENTRIES,
+  maxBytes: EMOJI_CACHE_MAX_BYTES,
+  estimate: estimateStringBytes
+})
+const imageDataUrlCache = createBoundedCache<string>({
+  maxEntries: IMAGE_CACHE_MAX_ENTRIES,
+  maxBytes: IMAGE_CACHE_MAX_BYTES,
+  estimate: estimateStringBytes
+})
+const voiceDataUrlCache = createBoundedCache<string>({
+  maxEntries: VOICE_CACHE_MAX_ENTRIES,
+  maxBytes: VOICE_CACHE_MAX_BYTES,
+  estimate: estimateStringBytes
+})
+const voiceTranscriptCache = createBoundedCache<string>({
+  maxEntries: VOICE_TRANSCRIPT_CACHE_MAX_ENTRIES,
+  maxBytes: VOICE_TRANSCRIPT_CACHE_MAX_BYTES,
+  estimate: estimateStringBytes
+})
 type SharedImageDecryptResult = {
   success: boolean
   localPath?: string
@@ -8040,7 +8252,9 @@ type SharedImageDecryptResult = {
   failureKind?: 'not_found' | 'decrypt_failed'
 }
 const imageDecryptInFlight = new Map<string, Promise<SharedImageDecryptResult>>()
-const senderAvatarCache = new Map<string, { avatarUrl?: string; displayName?: string }>()
+const senderAvatarCache = createBoundedCache<{ avatarUrl?: string; displayName?: string }>({
+  maxEntries: SENDER_AVATAR_CACHE_MAX_ENTRIES
+})
 const senderAvatarLoading = new Map<string, Promise<{ avatarUrl?: string; displayName?: string } | null>>()
 
 function getSharedImageDecryptTask(
@@ -8094,7 +8308,7 @@ function QuotedEmoji({ cdnUrl, md5 }: { cdnUrl: string; md5?: string }) {
 
   if (error || (!loading && !localPath)) return <span className="quoted-type-label">[动画表情]</span>
   if (loading) return <span className="quoted-type-label">[动画表情]</span>
-  return <img src={localPath} alt="动画表情" className="quoted-emoji-image" />
+  return <img src={localPath} alt="动画表情" className="quoted-emoji-image" loading="lazy" decoding="async" />
 }
 
 // 消息气泡组件
@@ -8197,7 +8411,10 @@ function MessageBubble({
   const [voiceCurrentTime, setVoiceCurrentTime] = useState(0)
   const [voiceDuration, setVoiceDuration] = useState(0)
   const [voiceWaveform, setVoiceWaveform] = useState<number[]>([])
+  const [voiceWaveformRequested, setVoiceWaveformRequested] = useState(false)
   const voiceAutoDecryptTriggered = useRef(false)
+  const pendingScrollerDeltaRef = useRef(0)
+  const pendingScrollerDeltaRafRef = useRef<number | null>(null)
 
 
   const [systemAlert, setSystemAlert] = useState<{
@@ -8288,7 +8505,7 @@ function MessageBubble({
 
   const stabilizeScrollerByDelta = useCallback((host: HTMLElement | null, delta: number) => {
     if (!host) return
-    if (!Number.isFinite(delta) || Math.abs(delta) < 1) return
+    if (!Number.isFinite(delta) || Math.abs(delta) < 1.5) return
     const scroller = host.closest('.message-list') as HTMLDivElement | null
     if (!scroller) return
 
@@ -8301,7 +8518,17 @@ function MessageBubble({
     const viewportBottom = scroller.scrollTop + scroller.clientHeight
     if (hostTopInScroller > viewportBottom + 24) return
 
-    scroller.scrollTop += delta
+    pendingScrollerDeltaRef.current += delta
+    if (pendingScrollerDeltaRafRef.current !== null) return
+    pendingScrollerDeltaRafRef.current = window.requestAnimationFrame(() => {
+      pendingScrollerDeltaRafRef.current = null
+      const applyDelta = pendingScrollerDeltaRef.current
+      pendingScrollerDeltaRef.current = 0
+      if (!Number.isFinite(applyDelta) || Math.abs(applyDelta) < 1.5) return
+      const nextScroller = host.closest('.message-list') as HTMLDivElement | null
+      if (!nextScroller) return
+      nextScroller.scrollTop += applyDelta
+    })
   }, [])
 
   const bindResizeObserverForHost = useCallback((
@@ -8392,12 +8619,12 @@ function MessageBubble({
   useEffect(() => {
     if (!isImage) return
     return bindResizeObserverForHost(imageContainerRef.current, imageObservedHeightRef, imageResizeBaselineRef)
-  }, [isImage, imageLocalPath, imageLoading, imageError, bindResizeObserverForHost])
+  }, [isImage, bindResizeObserverForHost])
 
   useEffect(() => {
     if (!isEmoji) return
     return bindResizeObserverForHost(emojiContainerRef.current, emojiObservedHeightRef, emojiResizeBaselineRef)
-  }, [isEmoji, emojiLocalPath, emojiLoading, emojiError, bindResizeObserverForHost])
+  }, [isEmoji, bindResizeObserverForHost])
 
   // 下载表情包
   const downloadEmoji = () => {
@@ -8578,13 +8805,13 @@ function MessageBubble({
     return { success: false }
   }, [isImage, message.imageMd5, message.imageDatName, message.createTime, message.localId, session.username, imageCacheKey, detectImageMimeFromBase64, imageLocalPath, captureImageResizeBaseline, lockImageStageHeight])
 
-  const triggerForceHd = useCallback(() => {
+  const triggerForceHd = useCallback(async (): Promise<void> => {
     if (!message.imageMd5 && !message.imageDatName) return
     if (imageForceHdAttempted.current === imageCacheKey) return
     if (imageForceHdPending.current) return
     imageForceHdAttempted.current = imageCacheKey
     imageForceHdPending.current = true
-    requestImageDecrypt(true, true).finally(() => {
+    await requestImageDecrypt(true, true).finally(() => {
       imageForceHdPending.current = false
     })
   }, [imageCacheKey, message.imageDatName, message.imageMd5, requestImageDecrypt])
@@ -8672,6 +8899,11 @@ function MessageBubble({
       if (imageClickTimerRef.current) {
         window.clearTimeout(imageClickTimerRef.current)
       }
+      if (pendingScrollerDeltaRafRef.current !== null) {
+        window.cancelAnimationFrame(pendingScrollerDeltaRafRef.current)
+        pendingScrollerDeltaRafRef.current = null
+      }
+      pendingScrollerDeltaRef.current = 0
     }
   }, [])
 
@@ -8805,14 +9037,16 @@ function MessageBubble({
     if (!message.imageMd5 && !message.imageDatName) return
     if (imageAutoDecryptTriggered.current) return
     imageAutoDecryptTriggered.current = true
-    void requestImageDecrypt()
+    void enqueueAutoMediaTask(async () => requestImageDecrypt()).catch(() => { })
   }, [isImage, imageInView, imageLocalPath, imageLoading, message.imageMd5, message.imageDatName, requestImageDecrypt])
 
   useEffect(() => {
     if (!isImage || !imageHasUpdate || !imageInView) return
     if (imageAutoHdTriggered.current === imageCacheKey) return
     imageAutoHdTriggered.current = imageCacheKey
-    triggerForceHd()
+    void enqueueAutoMediaTask(async () => {
+      await triggerForceHd()
+    }).catch(() => { })
   }, [isImage, imageHasUpdate, imageInView, imageCacheKey, triggerForceHd])
 
 
@@ -8854,30 +9088,36 @@ function MessageBubble({
 
   // 生成波形数据
   useEffect(() => {
-    if (!voiceDataUrl) {
+    if (!voiceDataUrl || !voiceWaveformRequested) {
       setVoiceWaveform([])
       return
     }
+
+    let cancelled = false
+    let audioCtx: AudioContext | null = null
 
     const generateWaveform = async () => {
       try {
         // 从 data:audio/wav;base64,... 提取 base64
         const base64 = voiceDataUrl.split(',')[1]
+        if (!base64) return
         const binaryString = window.atob(base64)
         const bytes = new Uint8Array(binaryString.length)
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i)
         }
 
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
+        audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
         const audioBuffer = await audioCtx.decodeAudioData(bytes.buffer)
+        if (cancelled) return
         const rawData = audioBuffer.getChannelData(0) // 获取单声道数据
-        const samples = 35 // 波形柱子数量
+        const samples = 24 // 波形柱子数量（降低解码计算成本）
         const blockSize = Math.floor(rawData.length / samples)
+        if (blockSize <= 0) return
         const filteredData: number[] = []
 
         for (let i = 0; i < samples; i++) {
-          let blockStart = blockSize * i
+          const blockStart = blockSize * i
           let sum = 0
           for (let j = 0; j < blockSize; j++) {
             sum = sum + Math.abs(rawData[blockStart + j])
@@ -8886,19 +9126,39 @@ function MessageBubble({
         }
 
         // 归一化
-        const multiplier = Math.pow(Math.max(...filteredData), -1)
+        const peak = Math.max(...filteredData)
+        if (!Number.isFinite(peak) || peak <= 0) return
+        const multiplier = Math.pow(peak, -1)
         const normalizedData = filteredData.map(n => n * multiplier)
-        setVoiceWaveform(normalizedData)
-        void audioCtx.close()
+        if (!cancelled) {
+          setVoiceWaveform(normalizedData)
+        }
       } catch (e) {
         console.error('Failed to generate waveform:', e)
         // 降级：生成随机但平滑的波形
-        setVoiceWaveform(Array.from({ length: 35 }, () => 0.2 + Math.random() * 0.8))
+        if (!cancelled) {
+          setVoiceWaveform(Array.from({ length: 24 }, () => 0.2 + Math.random() * 0.8))
+        }
+      } finally {
+        if (audioCtx) {
+          void audioCtx.close().catch(() => { })
+        }
       }
     }
 
-    void generateWaveform()
-  }, [voiceDataUrl])
+    scheduleWhenIdle(() => {
+      if (cancelled) return
+      void generateWaveform()
+    }, { timeout: 900, fallbackDelay: 80 })
+
+    return () => {
+      cancelled = true
+      if (audioCtx) {
+        void audioCtx.close().catch(() => { })
+        audioCtx = null
+      }
+    }
+  }, [voiceDataUrl, voiceWaveformRequested])
 
   // 消息加载时自动检测语音缓存
   useEffect(() => {
@@ -9082,7 +9342,9 @@ function MessageBubble({
     if (videoAutoLoadTriggered.current) return
 
     videoAutoLoadTriggered.current = true
-    void requestVideoInfo()
+    void enqueueAutoMediaTask(async () => requestVideoInfo()).catch(() => {
+      videoAutoLoadTriggered.current = false
+    })
   }, [isVideo, isVideoVisible, videoInfo, requestVideoInfo])
 
   useEffect(() => {
@@ -9401,6 +9663,8 @@ function MessageBubble({
                   src={imageLocalPath}
                   alt="图片"
                   className={`image-message ${imageLoaded ? 'ready' : 'pending'}`}
+                  loading="lazy"
+                  decoding="async"
                   onClick={() => { void handleOpenImageViewer() }}
                   onLoad={() => {
                     setImageLoaded(true)
@@ -9477,9 +9741,9 @@ function MessageBubble({
       // 默认显示缩略图，点击打开独立播放窗口
       const thumbSrc = videoInfo.thumbUrl || videoInfo.coverUrl
       return (
-        <div className="video-thumb-wrapper" ref={videoContainerRef as React.RefObject<HTMLDivElement>} onClick={handlePlayVideo}>
+          <div className="video-thumb-wrapper" ref={videoContainerRef as React.RefObject<HTMLDivElement>} onClick={handlePlayVideo}>
           {thumbSrc ? (
-            <img src={thumbSrc} alt="视频缩略图" className="video-thumb" />
+            <img src={thumbSrc} alt="视频缩略图" className="video-thumb" loading="lazy" decoding="async" />
           ) : (
             <div className="video-thumb-placeholder">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -9499,6 +9763,9 @@ function MessageBubble({
       const durationText = message.voiceDurationSeconds ? `${message.voiceDurationSeconds}"` : ''
       const handleToggle = async () => {
         if (voiceLoading) return
+        if (!voiceWaveformRequested) {
+          setVoiceWaveformRequested(true)
+        }
         const audio = voiceAudioRef.current || new Audio()
         if (!voiceAudioRef.current) {
           voiceAudioRef.current = audio

@@ -219,6 +219,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         allowStaleCache?: boolean
         preferAccurateSpecialTypes?: boolean
         cacheOnly?: boolean
+        beginTimestamp?: number
+        endTimestamp?: number
       }
     ) => ipcRenderer.invoke('chat:getExportSessionStats', sessionIds, options),
     getGroupMyMessageCountHint: (chatroomId: string) =>
@@ -412,6 +414,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     generateReport: (year: number) => ipcRenderer.invoke('annualReport:generateReport', year),
     exportImages: (payload: { baseDir: string; folderName: string; images: Array<{ name: string; dataUrl: string }> }) =>
       ipcRenderer.invoke('annualReport:exportImages', payload),
+    captureCurrentWindow: () => ipcRenderer.invoke('annualReport:captureCurrentWindow'),
     onAvailableYearsProgress: (callback: (payload: {
       taskId: string
       years?: number[]
@@ -791,4 +794,3 @@ contextBridge.exposeInMainWorld('electronAPI', {
     validateWeiboUid: (uid: string) => ipcRenderer.invoke('social:validateWeiboUid', uid)
   }
 })
-

@@ -65,6 +65,7 @@ import type { SnsPost } from '../types/sns'
 import {
   cloneExportDateRange,
   cloneExportDateRangeSelection,
+  createExportDateRangeSelectionFromPreset,
   createDateRangeByLastNDays,
   createDefaultDateRange,
   createDefaultExportDateRangeSelection,
@@ -1599,6 +1600,19 @@ const areExportSelectionsEqual = (left: ExportDateRangeSelection, right: ExportD
   left.dateRange.end.getTime() === right.dateRange.end.getTime()
 )
 
+const resolveDynamicExportSelection = (
+  selection: ExportDateRangeSelection,
+  now = new Date()
+): ExportDateRangeSelection => {
+  if (selection.useAllTime) {
+    return cloneExportDateRangeSelection(selection)
+  }
+  if (selection.preset === 'custom') {
+    return cloneExportDateRangeSelection(selection)
+  }
+  return createExportDateRangeSelectionFromPreset(selection.preset, now)
+}
+
 const pickSessionMediaMetric = (
   metricRaw: SessionExportMetric | SessionContentMetric | undefined
 ): SessionContentMetric | null => {
@@ -1898,6 +1912,9 @@ const TaskCenterModal = memo(function TaskCenterModal({
                 const mediaCacheMetricLabel = mediaCacheTotal > 0
                   ? `缓存命中 ${mediaCacheHitFiles}/${mediaCacheTotal}`
                   : ''
+                const mediaMissMetricLabel = mediaCacheMissFiles > 0
+                  ? `缓存未命中 ${mediaCacheMissFiles}`
+                  : ''
                 const mediaDedupMetricLabel = mediaDedupReuseFiles > 0
                   ? `复用 ${mediaDedupReuseFiles}`
                   : ''
@@ -1911,7 +1928,7 @@ const TaskCenterModal = memo(function TaskCenterModal({
                   )
                   : ''
                 const mediaLiveMetricLabel = task.progress.phase === 'exporting-media'
-                  ? (mediaDoneFiles > 0 ? `已处理 ${mediaDoneFiles}` : '')
+                  ? (mediaDoneFiles > 0 ? `已写入 ${mediaDoneFiles}` : '')
                   : ''
                 const sessionProgressLabel = completedSessionTotal > 0
                   ? `会话 ${completedSessionCount}/${completedSessionTotal}`
@@ -1958,6 +1975,7 @@ const TaskCenterModal = memo(function TaskCenterModal({
                             {phaseMetricLabel ? ` · ${phaseMetricLabel}` : ''}
                             {mediaLiveMetricLabel ? ` · ${mediaLiveMetricLabel}` : ''}
                             {mediaCacheMetricLabel ? ` · ${mediaCacheMetricLabel}` : ''}
+                            {mediaMissMetricLabel ? ` · ${mediaMissMetricLabel}` : ''}
                             {mediaDedupMetricLabel ? ` · ${mediaDedupMetricLabel}` : ''}
                             {task.status === 'running' && currentSessionRatio !== null
                               ? `（当前会话 ${Math.round(currentSessionRatio * 100)}%）`
@@ -2233,6 +2251,27 @@ function ExportPage() {
     displayNamePreference: 'remark',
     exportConcurrency: 2
   })
+
+  const exportStatsRangeOptions = useMemo(() => {
+    if (options.useAllTime || !options.dateRange) return null
+    const beginTimestamp = Math.floor(options.dateRange.start.getTime() / 1000)
+    const endTimestamp = Math.floor(options.dateRange.end.getTime() / 1000)
+    if (!Number.isFinite(beginTimestamp) || !Number.isFinite(endTimestamp)) return null
+    if (beginTimestamp <= 0 && endTimestamp <= 0) return null
+    return {
+      beginTimestamp: Math.max(0, beginTimestamp),
+      endTimestamp: Math.max(0, endTimestamp)
+    }
+  }, [options.useAllTime, options.dateRange])
+
+  const withExportStatsRange = useCallback((statsOptions: Record<string, any>): Record<string, any> => {
+    if (!exportStatsRangeOptions) return statsOptions
+    return {
+      ...statsOptions,
+      beginTimestamp: exportStatsRangeOptions.beginTimestamp,
+      endTimestamp: exportStatsRangeOptions.endTimestamp
+    }
+  }, [exportStatsRangeOptions])
 
   const [exportDialog, setExportDialog] = useState<ExportDialogState>({
     open: false,
@@ -3999,7 +4038,7 @@ function ExportPage() {
           const cacheResult = await withTimeout(
             window.electronAPI.chat.getExportSessionStats(
               batchSessionIds,
-              { includeRelations: false, allowStaleCache: true, cacheOnly: true }
+              withExportStatsRange({ includeRelations: false, allowStaleCache: true, cacheOnly: true })
             ),
             12000,
             'cacheOnly'
@@ -4014,7 +4053,7 @@ function ExportPage() {
             const freshResult = await withTimeout(
               window.electronAPI.chat.getExportSessionStats(
                 missingSessionIds,
-                { includeRelations: false, allowStaleCache: true }
+                withExportStatsRange({ includeRelations: false, allowStaleCache: true })
               ),
               45000,
               'fresh'
@@ -4058,7 +4097,7 @@ function ExportPage() {
         void runSessionMediaMetricWorker(runId)
       }
     }
-  }, [applySessionMediaMetricsFromStats, isSessionMediaMetricReady, patchSessionLoadTraceStage])
+  }, [applySessionMediaMetricsFromStats, isSessionMediaMetricReady, patchSessionLoadTraceStage, withExportStatsRange])
 
   const scheduleSessionMediaMetricWorker = useCallback(() => {
     if (activeTaskCountRef.current > 0) return
@@ -4765,19 +4804,20 @@ function ExportPage() {
   const clearSelection = () => setSelectedSessions(new Set())
 
   const openExportDialog = useCallback((payload: Omit<ExportDialogState, 'open' | 'intent'> & { intent?: ExportDialogState['intent'] }) => {
+    const dynamicDefaultRangeSelection = resolveDynamicExportSelection(exportDefaultDateRangeSelection, new Date())
     setExportDialog({ open: true, intent: payload.intent || 'manual', ...payload })
     setIsTimeRangeDialogOpen(false)
     setTimeRangeBounds(null)
-    setTimeRangeSelection(exportDefaultDateRangeSelection)
+    setTimeRangeSelection(dynamicDefaultRangeSelection)
 
     setOptions(prev => {
-      const nextDateRange = cloneExportDateRange(exportDefaultDateRangeSelection.dateRange)
+      const nextDateRange = cloneExportDateRange(dynamicDefaultRangeSelection.dateRange)
 
       const next: ExportOptions = {
         ...prev,
         format: exportDefaultFormat,
         exportAvatars: exportDefaultAvatars,
-        useAllTime: exportDefaultDateRangeSelection.useAllTime,
+        useAllTime: dynamicDefaultRangeSelection.useAllTime,
         dateRange: nextDateRange,
         exportMedia: Boolean(
           exportDefaultMedia.images ||
@@ -4838,9 +4878,13 @@ function ExportPage() {
     setTimeRangeBounds(null)
   }, [])
 
-  const resolveChatExportTimeRangeBounds = useCallback(async (sessionIds: string[]): Promise<TimeRangeBounds | null> => {
+  const resolveChatExportTimeRangeBounds = useCallback(async (
+    sessionIds: string[],
+    options?: { forceRefresh?: boolean }
+  ): Promise<TimeRangeBounds | null> => {
     const normalizedSessionIds = Array.from(new Set((sessionIds || []).map(id => String(id || '').trim()).filter(Boolean)))
     if (normalizedSessionIds.length === 0) return null
+    const forceRefresh = options?.forceRefresh === true
 
     const sessionRowMap = new Map<string, SessionRow>()
     for (const session of sessions) {
@@ -4903,29 +4947,36 @@ function ExportPage() {
       return !resolved?.hasMin || !resolved?.hasMax
     })
 
-    const staleSessionIds = new Set<string>()
-
-    if (missingSessionIds().length > 0) {
-      const cacheResult = await window.electronAPI.chat.getExportSessionStats(
-        missingSessionIds(),
-        { includeRelations: false, allowStaleCache: true, cacheOnly: true }
-      )
-      applyStatsResult(cacheResult)
-      for (const sessionId of cacheResult?.needsRefresh || []) {
-        staleSessionIds.add(String(sessionId || '').trim())
-      }
-    }
-
-    const sessionsNeedingFreshStats = Array.from(new Set([
-      ...missingSessionIds(),
-      ...Array.from(staleSessionIds).filter(Boolean)
-    ]))
-
-    if (sessionsNeedingFreshStats.length > 0) {
+    if (forceRefresh) {
       applyStatsResult(await window.electronAPI.chat.getExportSessionStats(
-        sessionsNeedingFreshStats,
-        { includeRelations: false }
+        normalizedSessionIds,
+        { includeRelations: false, forceRefresh: true }
       ))
+    } else {
+      const staleSessionIds = new Set<string>()
+
+      if (missingSessionIds().length > 0) {
+        const cacheResult = await window.electronAPI.chat.getExportSessionStats(
+          missingSessionIds(),
+          { includeRelations: false, allowStaleCache: true, cacheOnly: true }
+        )
+        applyStatsResult(cacheResult)
+        for (const sessionId of cacheResult?.needsRefresh || []) {
+          staleSessionIds.add(String(sessionId || '').trim())
+        }
+      }
+
+      const sessionsNeedingFreshStats = Array.from(new Set([
+        ...missingSessionIds(),
+        ...Array.from(staleSessionIds).filter(Boolean)
+      ]))
+
+      if (sessionsNeedingFreshStats.length > 0) {
+        applyStatsResult(await window.electronAPI.chat.getExportSessionStats(
+          sessionsNeedingFreshStats,
+          { includeRelations: false }
+        ))
+      }
     }
 
     if (missingSessionIds().length > 0) {
@@ -4946,14 +4997,26 @@ function ExportPage() {
       if (isResolvingTimeRangeBounds) return
       setIsResolvingTimeRangeBounds(true)
       try {
+        const liveSelection = resolveDynamicExportSelection(timeRangeSelection, new Date())
+        if (!areExportSelectionsEqual(liveSelection, timeRangeSelection)) {
+          setTimeRangeSelection(liveSelection)
+          setOptions(prev => ({
+            ...prev,
+            useAllTime: liveSelection.useAllTime,
+            dateRange: cloneExportDateRange(liveSelection.dateRange)
+          }))
+        }
+
         let nextBounds: TimeRangeBounds | null = null
         if (exportDialog.scope !== 'sns') {
-          nextBounds = await resolveChatExportTimeRangeBounds(exportDialog.sessionIds)
+          nextBounds = await resolveChatExportTimeRangeBounds(exportDialog.sessionIds, {
+            forceRefresh: exportDialog.scope === 'single'
+          })
         }
         setTimeRangeBounds(nextBounds)
         if (nextBounds) {
-          const nextSelection = clampExportSelectionToBounds(timeRangeSelection, nextBounds)
-          if (!areExportSelectionsEqual(nextSelection, timeRangeSelection)) {
+          const nextSelection = clampExportSelectionToBounds(liveSelection, nextBounds)
+          if (!areExportSelectionsEqual(nextSelection, liveSelection)) {
             setTimeRangeSelection(nextSelection)
             setOptions(prev => ({
               ...prev,
@@ -5031,47 +5094,51 @@ function ExportPage() {
     return unsubscribe
   }, [loadBaseConfig, openExportDialog])
 
-  const buildExportOptions = (scope: TaskScope, contentType?: ContentType): ElectronExportOptions => {
+  const buildExportOptions = (
+    scope: TaskScope,
+    contentType?: ContentType,
+    sourceOptions: ExportOptions = options
+  ): ElectronExportOptions => {
     const sessionLayout: SessionLayout = writeLayout === 'C' ? 'per-session' : 'shared'
     const exportMediaEnabled = Boolean(
-      options.exportImages ||
-      options.exportVoices ||
-      options.exportVideos ||
-      options.exportEmojis ||
-      options.exportFiles
+      sourceOptions.exportImages ||
+      sourceOptions.exportVoices ||
+      sourceOptions.exportVideos ||
+      sourceOptions.exportEmojis ||
+      sourceOptions.exportFiles
     )
 
     const base: ElectronExportOptions = {
-      format: options.format,
-      exportAvatars: options.exportAvatars,
+      format: sourceOptions.format,
+      exportAvatars: sourceOptions.exportAvatars,
       exportMedia: exportMediaEnabled,
-      exportImages: options.exportImages,
-      exportVoices: options.exportVoices,
-      exportVideos: options.exportVideos,
-      exportEmojis: options.exportEmojis,
-      exportFiles: options.exportFiles,
-      maxFileSizeMb: options.maxFileSizeMb,
-      exportVoiceAsText: options.exportVoiceAsText,
-      excelCompactColumns: options.excelCompactColumns,
-      txtColumns: options.txtColumns,
-      displayNamePreference: options.displayNamePreference,
-      exportConcurrency: options.exportConcurrency,
+      exportImages: sourceOptions.exportImages,
+      exportVoices: sourceOptions.exportVoices,
+      exportVideos: sourceOptions.exportVideos,
+      exportEmojis: sourceOptions.exportEmojis,
+      exportFiles: sourceOptions.exportFiles,
+      maxFileSizeMb: sourceOptions.maxFileSizeMb,
+      exportVoiceAsText: sourceOptions.exportVoiceAsText,
+      excelCompactColumns: sourceOptions.excelCompactColumns,
+      txtColumns: sourceOptions.txtColumns,
+      displayNamePreference: sourceOptions.displayNamePreference,
+      exportConcurrency: sourceOptions.exportConcurrency,
       fileNamingMode: exportDefaultFileNamingMode,
       sessionLayout,
       sessionNameWithTypePrefix,
-      dateRange: options.useAllTime
+      dateRange: sourceOptions.useAllTime
         ? null
-        : options.dateRange
+        : sourceOptions.dateRange
           ? {
-              start: Math.floor(options.dateRange.start.getTime() / 1000),
-              end: Math.floor(options.dateRange.end.getTime() / 1000)
+              start: Math.floor(sourceOptions.dateRange.start.getTime() / 1000),
+              end: Math.floor(sourceOptions.dateRange.end.getTime() / 1000)
             }
           : null
     }
 
     if (scope === 'content' && contentType) {
       if (contentType === 'text') {
-        const textExportConcurrency = Math.min(2, Math.max(1, base.exportConcurrency ?? options.exportConcurrency))
+        const textExportConcurrency = Math.min(2, Math.max(1, base.exportConcurrency ?? sourceOptions.exportConcurrency))
         return {
           ...base,
           contentType,
@@ -5102,14 +5169,14 @@ function ExportPage() {
     return base
   }
 
-  const buildSnsExportOptions = () => {
+  const buildSnsExportOptions = (sourceOptions: ExportOptions = options) => {
     const format: SnsTimelineExportFormat = snsExportFormat
-    const dateRange = options.useAllTime
+    const dateRange = sourceOptions.useAllTime
       ? null
-      : options.dateRange
+      : sourceOptions.dateRange
         ? {
-            startTime: Math.floor(options.dateRange.start.getTime() / 1000),
-            endTime: Math.floor(options.dateRange.end.getTime() / 1000)
+            startTime: Math.floor(sourceOptions.dateRange.start.getTime() / 1000),
+            endTime: Math.floor(sourceOptions.dateRange.end.getTime() / 1000)
           }
         : null
 
@@ -5921,12 +5988,27 @@ function ExportPage() {
     if (!exportDialog.open || !exportFolder) return
     if (exportDialog.scope !== 'sns' && exportDialog.sessionIds.length === 0) return
 
+    const effectiveRangeSelection = resolveDynamicExportSelection(timeRangeSelection, new Date())
+    if (!areExportSelectionsEqual(effectiveRangeSelection, timeRangeSelection)) {
+      setTimeRangeSelection(effectiveRangeSelection)
+    }
+    const effectiveOptionsState: ExportOptions = {
+      ...options,
+      useAllTime: effectiveRangeSelection.useAllTime,
+      dateRange: cloneExportDateRange(effectiveRangeSelection.dateRange)
+    }
+    setOptions(prev => ({
+      ...prev,
+      useAllTime: effectiveOptionsState.useAllTime,
+      dateRange: cloneExportDateRange(effectiveRangeSelection.dateRange)
+    }))
+
     const isAutomationCreateIntent = exportDialog.intent === 'automation-create'
     const exportOptions = exportDialog.scope === 'sns'
       ? undefined
-      : buildExportOptions(exportDialog.scope, exportDialog.contentType)
+      : buildExportOptions(exportDialog.scope, exportDialog.contentType, effectiveOptionsState)
     const snsOptions = exportDialog.scope === 'sns'
-      ? buildSnsExportOptions()
+      ? buildSnsExportOptions(effectiveOptionsState)
       : undefined
     const title =
       exportDialog.scope === 'single'
@@ -5943,7 +6025,7 @@ function ExportPage() {
         return
       }
       const { dateRange: _discard, ...optionTemplate } = exportOptions
-      const normalizedRangeSelection = cloneExportDateRangeSelection(timeRangeSelection)
+      const normalizedRangeSelection = cloneExportDateRangeSelection(effectiveRangeSelection)
       const scope = exportDialog.scope === 'single'
         ? 'single'
         : exportDialog.scope === 'content'
@@ -7239,7 +7321,7 @@ function ExportPage() {
       try {
         const quickStatsResult = await window.electronAPI.chat.getExportSessionStats(
           [normalizedSessionId],
-          { includeRelations: false, allowStaleCache: true, cacheOnly: true }
+          withExportStatsRange({ includeRelations: false, allowStaleCache: true, cacheOnly: true })
         )
         if (requestSeq !== detailRequestSeqRef.current) return
         if (quickStatsResult.success) {
@@ -7266,7 +7348,7 @@ function ExportPage() {
       try {
         const relationCacheResult = await window.electronAPI.chat.getExportSessionStats(
           [normalizedSessionId],
-          { includeRelations: true, allowStaleCache: true, cacheOnly: true }
+          withExportStatsRange({ includeRelations: true, allowStaleCache: true, cacheOnly: true })
         )
         if (requestSeq !== detailRequestSeqRef.current) return
         if (relationCacheResult.success && relationCacheResult.data) {
@@ -7291,7 +7373,7 @@ function ExportPage() {
             // 后台补齐非关系统计，不走精确特型扫描，避免阻塞列表统计队列。
             const freshResult = await window.electronAPI.chat.getExportSessionStats(
               [normalizedSessionId],
-              { includeRelations: false, forceRefresh: true }
+              withExportStatsRange({ includeRelations: false, forceRefresh: true })
             )
             if (requestSeq !== detailRequestSeqRef.current) return
             if (freshResult.success && freshResult.data) {
@@ -7326,7 +7408,7 @@ function ExportPage() {
         setIsLoadingSessionDetailExtra(false)
       }
     }
-  }, [applySessionDetailStats, contactByUsername, mergeSessionContentMetrics, sessionContentMetrics, sessionMessageCounts, sessionRowByUsername])
+  }, [applySessionDetailStats, contactByUsername, mergeSessionContentMetrics, sessionContentMetrics, sessionMessageCounts, sessionRowByUsername, withExportStatsRange])
 
   const loadSessionRelationStats = useCallback(async (options?: { forceRefresh?: boolean }) => {
     const normalizedSessionId = String(sessionDetail?.wxid || '').trim()
@@ -7339,7 +7421,7 @@ function ExportPage() {
       if (!forceRefresh) {
         const relationCacheResult = await window.electronAPI.chat.getExportSessionStats(
           [normalizedSessionId],
-          { includeRelations: true, allowStaleCache: true, cacheOnly: true }
+          withExportStatsRange({ includeRelations: true, allowStaleCache: true, cacheOnly: true })
         )
         if (requestSeq !== detailRequestSeqRef.current) return
 
@@ -7357,7 +7439,7 @@ function ExportPage() {
 
       const relationResult = await window.electronAPI.chat.getExportSessionStats(
         [normalizedSessionId],
-        { includeRelations: true, forceRefresh, preferAccurateSpecialTypes: true }
+        withExportStatsRange({ includeRelations: true, forceRefresh, preferAccurateSpecialTypes: true })
       )
       if (requestSeq !== detailRequestSeqRef.current) return
 
@@ -7377,7 +7459,7 @@ function ExportPage() {
         setIsLoadingSessionRelationStats(false)
       }
     }
-  }, [applySessionDetailStats, isLoadingSessionRelationStats, sessionDetail?.wxid])
+  }, [applySessionDetailStats, isLoadingSessionRelationStats, sessionDetail?.wxid, withExportStatsRange])
 
   const handleRefreshTableData = useCallback(async () => {
     const scopeKey = await ensureExportCacheScope()

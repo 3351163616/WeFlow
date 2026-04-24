@@ -85,6 +85,8 @@ function App() {
   const isChatHistoryWindow = location.pathname.startsWith('/chat-history/') || location.pathname.startsWith('/chat-history-inline/')
   const isStandaloneChatWindow = location.pathname === '/chat-window'
   const isNotificationWindow = location.pathname === '/notification-window'
+  const isAnnualReportWindow = location.pathname === '/annual-report/view'
+  const isDualReportWindow = location.pathname === '/dual-report/view'
   const isSettingsRoute = location.pathname === '/settings'
   const settingsRouteState = location.state as { backgroundLocation?: Location; initialTab?: unknown } | null
   const routeLocation = isSettingsRoute
@@ -138,7 +140,7 @@ function App() {
     const body = document.body
     const appRoot = document.getElementById('app')
 
-    if (isOnboardingWindow || isNotificationWindow) {
+    if (isOnboardingWindow || isNotificationWindow || isAnnualReportWindow || isDualReportWindow) {
       root.style.background = 'transparent'
       body.style.background = 'transparent'
       body.style.overflow = 'hidden'
@@ -155,7 +157,7 @@ function App() {
         appRoot.style.overflow = ''
       }
     }
-  }, [isOnboardingWindow])
+  }, [isOnboardingWindow, isNotificationWindow, isAnnualReportWindow, isDualReportWindow])
 
   // 应用主题
   useEffect(() => {
@@ -176,7 +178,7 @@ function App() {
     }
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
-  }, [currentTheme, themeMode, isOnboardingWindow, isNotificationWindow])
+  }, [currentTheme, themeMode, isOnboardingWindow, isNotificationWindow, isAnnualReportWindow, isDualReportWindow])
 
   // 读取已保存的主题设置
   useEffect(() => {
@@ -520,6 +522,16 @@ function App() {
   // 独立通知窗口
   if (isNotificationWindow) {
     return <NotificationWindow />
+  }
+
+  // 独立年度报告全屏窗口
+  if (isAnnualReportWindow) {
+    return <AnnualReportWindow />
+  }
+
+  // 独立双人报告全屏窗口
+  if (isDualReportWindow) {
+    return <DualReportWindow />
   }
 
   // 主窗口 - 完整布局

@@ -22,7 +22,7 @@ export function GlobalSessionMonitor() {
     // 去重辅助函数：获取消息 key
     const getMessageKey = (msg: Message) => {
         if (msg.messageKey) return msg.messageKey
-        return `fallback:${msg.serverId || 0}:${msg.createTime}:${msg.sortSeq || 0}:${msg.localId || 0}:${msg.senderUsername || ''}:${msg.localType || 0}`
+        return `fallback:${msg._db_path || ''}:${msg.serverId || 0}:${msg.createTime}:${msg.sortSeq || 0}:${msg.localId || 0}:${msg.senderUsername || ''}:${msg.localType || 0}`
     }
 
     // 处理数据库变更

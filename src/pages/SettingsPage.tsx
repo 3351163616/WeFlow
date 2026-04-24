@@ -56,6 +56,7 @@ const aiTabs: Array<{ id: Extract<SettingsTab, 'aiCommon' | 'insight' | 'aiFootp
 const isMac = navigator.userAgent.toLowerCase().includes('mac')
 const isLinux = navigator.userAgent.toLowerCase().includes('linux')
 const isWindows = !isMac && !isLinux
+const MAC_KEY_FAQ_URL = 'https://github.com/hicccc77/WeFlow/blob/main/docs/MAC-KEY-FAQ.md'
 
 const dbDirName = isMac ? '2.0b4.0.9 目录' : 'xwechat_files 目录'
 const dbPathPlaceholder = isMac
@@ -75,6 +76,7 @@ interface WxidOption {
 type SessionFilterType = configService.MessagePushSessionType
 type SessionFilterTypeValue = 'all' | SessionFilterType
 type SessionFilterMode = 'all' | 'whitelist' | 'blacklist'
+type InsightSessionFilterTypeValue = 'all' | 'private' | 'group' | 'official'
 
 interface SessionFilterOption {
   username: string
@@ -89,6 +91,13 @@ const sessionFilterTypeOptions: Array<{ value: SessionFilterTypeValue; label: st
   { value: 'group', label: '群聊' },
   { value: 'official', label: '订阅号/服务号' },
   { value: 'other', label: '其他/非好友' }
+]
+
+const insightFilterTypeOptions: Array<{ value: InsightSessionFilterTypeValue; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'private', label: '私聊' },
+  { value: 'group', label: '群聊' },
+  { value: 'official', label: '订阅号/服务号' }
 ]
 
 interface SettingsPageProps {
@@ -194,6 +203,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [filterModeDropdownOpen, setFilterModeDropdownOpen] = useState(false)
   const [positionDropdownOpen, setPositionDropdownOpen] = useState(false)
   const [closeBehaviorDropdownOpen, setCloseBehaviorDropdownOpen] = useState(false)
+  const [insightFilterModeDropdownOpen, setInsightFilterModeDropdownOpen] = useState(false)
 
   const [wordCloudExcludeWords, setWordCloudExcludeWords] = useState<string[]>([])
   const [excludeWordsInput, setExcludeWordsInput] = useState('')
@@ -216,6 +226,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [message, setMessage] = useState<{ text: string; success: boolean } | null>(null)
   const [showDecryptKey, setShowDecryptKey] = useState(false)
   const [dbKeyStatus, setDbKeyStatus] = useState('')
+  const [dbKeyError, setDbKeyError] = useState('')
   const [imageKeyStatus, setImageKeyStatus] = useState('')
   const [isManualStartPrompt, setIsManualStartPrompt] = useState(false)
   const [isClearingAnalyticsCache, setIsClearingAnalyticsCache] = useState(false)
@@ -275,8 +286,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [showInsightApiKey, setShowInsightApiKey] = useState(false)
   const [isTriggeringInsightTest, setIsTriggeringInsightTest] = useState(false)
   const [insightTriggerResult, setInsightTriggerResult] = useState<{ success: boolean; message: string } | null>(null)
-  const [aiInsightWhitelistEnabled, setAiInsightWhitelistEnabled] = useState(false)
-  const [aiInsightWhitelist, setAiInsightWhitelist] = useState<Set<string>>(new Set())
+  const [aiInsightFilterMode, setAiInsightFilterMode] = useState<configService.AiInsightFilterMode>('whitelist')
+  const [aiInsightFilterList, setAiInsightFilterList] = useState<Set<string>>(new Set())
+  const [insightFilterType, setInsightFilterType] = useState<InsightSessionFilterTypeValue>('all')
   const [insightWhitelistSearch, setInsightWhitelistSearch] = useState('')
   const [aiInsightCooldownMinutes, setAiInsightCooldownMinutes] = useState(120)
   const [aiInsightScanIntervalHours, setAiInsightScanIntervalHours] = useState(4)
@@ -397,15 +409,16 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         setPositionDropdownOpen(false)
         setCloseBehaviorDropdownOpen(false)
         setMessagePushFilterDropdownOpen(false)
+        setInsightFilterModeDropdownOpen(false)
       }
     }
-    if (filterModeDropdownOpen || positionDropdownOpen || closeBehaviorDropdownOpen || messagePushFilterDropdownOpen) {
+    if (filterModeDropdownOpen || positionDropdownOpen || closeBehaviorDropdownOpen || messagePushFilterDropdownOpen || insightFilterModeDropdownOpen) {
       document.addEventListener('click', handleClickOutside)
     }
     return () => {
       document.removeEventListener('click', handleClickOutside)
     }
-  }, [closeBehaviorDropdownOpen, filterModeDropdownOpen, messagePushFilterDropdownOpen, positionDropdownOpen])
+  }, [closeBehaviorDropdownOpen, filterModeDropdownOpen, insightFilterModeDropdownOpen, messagePushFilterDropdownOpen, positionDropdownOpen])
 
 
   const loadConfig = async () => {
@@ -531,8 +544,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const savedAiModelApiMaxTokens = await configService.getAiModelApiMaxTokens()
       const savedAiInsightSilenceDays = await configService.getAiInsightSilenceDays()
       const savedAiInsightAllowContext = await configService.getAiInsightAllowContext()
-      const savedAiInsightWhitelistEnabled = await configService.getAiInsightWhitelistEnabled()
-      const savedAiInsightWhitelist = await configService.getAiInsightWhitelist()
+      const savedAiInsightFilterMode = await configService.getAiInsightFilterMode()
+      const savedAiInsightFilterList = await configService.getAiInsightFilterList()
       const savedAiInsightCooldownMinutes = await configService.getAiInsightCooldownMinutes()
       const savedAiInsightScanIntervalHours = await configService.getAiInsightScanIntervalHours()
       const savedAiInsightContextCount = await configService.getAiInsightContextCount()
@@ -555,8 +568,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setAiModelApiMaxTokens(savedAiModelApiMaxTokens)
       setAiInsightSilenceDays(savedAiInsightSilenceDays)
       setAiInsightAllowContext(savedAiInsightAllowContext)
-      setAiInsightWhitelistEnabled(savedAiInsightWhitelistEnabled)
-      setAiInsightWhitelist(new Set(savedAiInsightWhitelist))
+      setAiInsightFilterMode(savedAiInsightFilterMode)
+      setAiInsightFilterList(new Set(savedAiInsightFilterList))
       setAiInsightCooldownMinutes(savedAiInsightCooldownMinutes)
       setAiInsightScanIntervalHours(savedAiInsightScanIntervalHours)
       setAiInsightContextCount(savedAiInsightContextCount)
@@ -1243,12 +1256,14 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     if (isFetchingDbKey) return
     setIsFetchingDbKey(true)
     setIsManualStartPrompt(false)
+    setDbKeyError('')
     setDbKeyStatus('正在连接微信进程...')
     try {
       const result = await window.electronAPI.key.autoGetDbKey()
       if (result.success && result.key) {
         setDecryptKey(result.key)
         setDbKeyStatus('密钥获取成功')
+        setDbKeyError('')
         showMessage('已自动获取解密密钥', true)
         await syncCurrentKeys({ decryptKey: result.key, wxid })
         const keysOverride = buildKeysFromInputs({ decryptKey: result.key })
@@ -1263,15 +1278,24 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         ) {
           setIsManualStartPrompt(true)
           setDbKeyStatus('需要手动启动微信')
+          setDbKeyError('')
         } else {
-          showMessage(result.error || '自动获取密钥失败', false)
+          const failureMessage = result.error || '自动获取密钥失败'
+          setDbKeyError(failureMessage)
+          showMessage(failureMessage, false)
         }
       }
     } catch (e: any) {
-      showMessage(`自动获取密钥失败: ${e}`, false)
+      const failureMessage = `自动获取密钥失败: ${e}`
+      setDbKeyError(failureMessage)
+      showMessage(failureMessage, false)
     } finally {
       setIsFetchingDbKey(false)
     }
+  }
+
+  const openMacKeyFaq = () => {
+    void window.electronAPI.shell.openExternal(MAC_KEY_FAQ_URL)
   }
 
   const handleManualConfirm = async () => {
@@ -2196,6 +2220,11 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
           </button>
         )}
         {dbKeyStatus && <div className="form-hint status-text">{dbKeyStatus}</div>}
+        {isMac && dbKeyError && (
+          <button type="button" className="mac-key-faq-link" onClick={openMacKeyFaq}>
+            查看 macOS 获取密钥排障指引
+          </button>
+        )}
       </div>
 
       <div className="form-group">
@@ -3390,98 +3419,129 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
       <div className="divider" />
 
-      {/* 对话白名单 */}
+      {/* 对话过滤名单 */}
       {(() => {
-        const sortedSessions = [...chatSessions].sort((a, b) => (b.sortTimestamp || 0) - (a.sortTimestamp || 0))
+        const selectableSessions = sessionFilterOptions.filter((session) =>
+          session.type === 'private' || session.type === 'group' || session.type === 'official'
+        )
         const keyword = insightWhitelistSearch.trim().toLowerCase()
-        const filteredSessions = sortedSessions.filter((s) => {
-          const id = s.username?.trim() || ''
-          if (!id || id.endsWith('@chatroom') || id.toLowerCase().includes('placeholder')) return false
+        const filteredSessions = selectableSessions.filter((session) => {
+          if (insightFilterType !== 'all' && session.type !== insightFilterType) return false
+          const id = session.username?.trim() || ''
+          if (!id || id.toLowerCase().includes('placeholder')) return false
           if (!keyword) return true
           return (
-            String(s.displayName || '').toLowerCase().includes(keyword) ||
+            String(session.displayName || '').toLowerCase().includes(keyword) ||
             id.toLowerCase().includes(keyword)
           )
         })
-        const filteredIds = filteredSessions.map((s) => s.username)
-        const selectedCount = aiInsightWhitelist.size
-        const selectedInFilteredCount = filteredIds.filter((id) => aiInsightWhitelist.has(id)).length
+        const filteredIds = filteredSessions.map((session) => session.username)
+        const selectedCount = aiInsightFilterList.size
+        const selectedInFilteredCount = filteredIds.filter((id) => aiInsightFilterList.has(id)).length
         const allFilteredSelected = filteredIds.length > 0 && selectedInFilteredCount === filteredIds.length
 
-        const toggleSession = (id: string) => {
-          setAiInsightWhitelist((prev) => {
-            const next = new Set(prev)
-            if (next.has(id)) next.delete(id)
-            else next.add(id)
-            return next
-          })
+        const saveFilterList = async (next: Set<string>) => {
+          await configService.setAiInsightFilterList(Array.from(next))
         }
 
-        const saveWhitelist = async (next: Set<string>) => {
-          await configService.setAiInsightWhitelist(Array.from(next))
+        const saveFilterMode = async (mode: configService.AiInsightFilterMode) => {
+          setAiInsightFilterMode(mode)
+          setInsightFilterModeDropdownOpen(false)
+          await configService.setAiInsightFilterMode(mode)
+          showMessage(mode === 'whitelist' ? '已切换为白名单模式' : '已切换为黑名单模式', true)
         }
 
         const selectAllFiltered = () => {
-          setAiInsightWhitelist((prev) => {
+          setAiInsightFilterList((prev) => {
             const next = new Set(prev)
             for (const id of filteredIds) next.add(id)
-            void saveWhitelist(next)
+            void saveFilterList(next)
             return next
           })
         }
 
         const clearSelection = () => {
           const next = new Set<string>()
-          setAiInsightWhitelist(next)
-          void saveWhitelist(next)
+          setAiInsightFilterList(next)
+          void saveFilterList(next)
         }
 
         return (
           <div className="anti-revoke-tab insight-social-tab">
             <div className="anti-revoke-hero">
               <div className="anti-revoke-hero-main">
-                <h3>对话白名单</h3>
+                <h3>对话黑白名单</h3>
                 <p>
-                  开启后，AI 见解仅对勾选的私聊对话生效，未勾选的对话将被完全忽略。关闭时对所有私聊均生效。中间可填写微博 UID。
+                  白名单模式下仅对已选会话触发见解；黑名单模式下会跳过已选会话。默认白名单且不选择任何会话。支持私聊、群聊、订阅号/服务号分类筛选后批量选择。
                 </p>
               </div>
               <div className="anti-revoke-metrics">
                 <div className="anti-revoke-metric is-total">
-                  <span className="label">私聊总数</span>
-                  <span className="value">{filteredIds.length + (keyword ? 0 : 0)}</span>
+                  <span className="label">可选会话总数</span>
+                  <span className="value">{selectableSessions.length}</span>
                 </div>
                 <div className="anti-revoke-metric is-installed">
-                  <span className="label">已选中</span>
+                  <span className="label">已加入名单</span>
                   <span className="value">{selectedCount}</span>
                 </div>
               </div>
             </div>
 
-            <div className="log-toggle-line" style={{ marginBottom: 12 }}>
-              <span className="log-status" style={{ fontWeight: 600 }}>
-                {aiInsightWhitelistEnabled ? '白名单已启用（仅对勾选对话生效）' : '白名单未启用（对所有私聊生效）'}
-              </span>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={aiInsightWhitelistEnabled}
-                  onChange={async (e) => {
-                    const val = e.target.checked
-                    setAiInsightWhitelistEnabled(val)
-                    await configService.setAiInsightWhitelistEnabled(val)
-                  }}
-                />
-                <span className="switch-slider" />
-              </label>
+            <div className="form-group" style={{ marginBottom: 12 }}>
+              <div className="log-toggle-line">
+                <span className="log-status" style={{ fontWeight: 600 }}>
+                  {aiInsightFilterMode === 'whitelist'
+                    ? '白名单模式（仅对名单内会话生效）'
+                    : '黑名单模式（名单内会话将被忽略）'}
+                </span>
+                <div className="custom-select" style={{ minWidth: 210 }}>
+                  <div
+                    className={`custom-select-trigger ${insightFilterModeDropdownOpen ? 'open' : ''}`}
+                    onClick={() => setInsightFilterModeDropdownOpen(!insightFilterModeDropdownOpen)}
+                  >
+                    <span className="custom-select-value">
+                      {aiInsightFilterMode === 'whitelist' ? '白名单模式' : '黑名单模式'}
+                    </span>
+                    <ChevronDown size={14} className={`custom-select-arrow ${insightFilterModeDropdownOpen ? 'rotate' : ''}`} />
+                  </div>
+                  <div className={`custom-select-dropdown ${insightFilterModeDropdownOpen ? 'open' : ''}`}>
+                    {[
+                      { value: 'whitelist', label: '白名单模式' },
+                      { value: 'blacklist', label: '黑名单模式' }
+                    ].map(option => (
+                      <div
+                        key={option.value}
+                        className={`custom-select-option ${aiInsightFilterMode === option.value ? 'selected' : ''}`}
+                        onClick={() => { void saveFilterMode(option.value as configService.AiInsightFilterMode) }}
+                      >
+                        {option.label}
+                        {aiInsightFilterMode === option.value && <Check size={14} />}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="anti-revoke-control-card">
+              <div className="push-filter-type-tabs" style={{ marginBottom: 10 }}>
+                {insightFilterTypeOptions.map(option => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`push-filter-type-tab ${insightFilterType === option.value ? 'active' : ''}`}
+                    onClick={() => setInsightFilterType(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
               <div className="anti-revoke-toolbar">
                 <div className="filter-search-box anti-revoke-search">
                   <Search size={14} />
                   <input
                     type="text"
-                    placeholder="搜索私聊对话..."
+                    placeholder="搜索对话..."
                     value={insightWhitelistSearch}
                     onChange={(e) => setInsightWhitelistSearch(e.target.value)}
                   />
@@ -3517,7 +3577,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
             <div className="anti-revoke-list">
               {filteredSessions.length === 0 ? (
                 <div className="anti-revoke-empty">
-                  {insightWhitelistSearch ? '没有匹配的对话' : '暂无私聊对话'}
+                  {insightWhitelistSearch || insightFilterType !== 'all' ? '没有匹配的对话' : '暂无可选对话'}
                 </div>
               ) : (
                 <>
@@ -3527,7 +3587,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                     <span>状态</span>
                   </div>
                   {filteredSessions.map((session) => {
-                    const isSelected = aiInsightWhitelist.has(session.username)
+                    const isSelected = aiInsightFilterList.has(session.username)
                     const weiboBinding = aiInsightWeiboBindings[session.username]
                     const weiboDraftValue = getWeiboBindingDraftValue(session.username)
                     const isBindingLoading = weiboBindingLoadingSessionId === session.username
@@ -3543,11 +3603,11 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                               type="checkbox"
                               checked={isSelected}
                               onChange={async () => {
-                                setAiInsightWhitelist((prev) => {
+                                setAiInsightFilterList((prev) => {
                                   const next = new Set(prev)
                                   if (next.has(session.username)) next.delete(session.username)
                                   else next.add(session.username)
-                                  void configService.setAiInsightWhitelist(Array.from(next))
+                                  void configService.setAiInsightFilterList(Array.from(next))
                                   return next
                                 })
                               }}
@@ -3563,54 +3623,65 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                           />
                           <div className="anti-revoke-row-text">
                             <span className="name">{session.displayName || session.username}</span>
+                            <span className="desc">{getSessionFilterTypeLabel(session.type)}</span>
                           </div>
                         </label>
                         <div className="insight-social-binding-cell">
-                          <div className="insight-social-binding-input-wrap">
-                            <span className="binding-platform-chip">微博</span>
-                            <input
-                              type="text"
-                              className="insight-social-binding-input"
-                              value={weiboDraftValue}
-                              placeholder="填写数字 UID"
-                              onChange={(e) => updateWeiboBindingDraft(session.username, e.target.value)}
-                            />
-                          </div>
-                          <div className="insight-social-binding-actions">
-                            <button
-                              type="button"
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => void handleSaveWeiboBinding(session.username, session.displayName || session.username)}
-                              disabled={isBindingLoading || !weiboDraftValue.trim()}
-                            >
-                              {isBindingLoading ? '绑定中...' : (weiboBinding ? '更新' : '绑定')}
-                            </button>
-                            {weiboBinding && (
-                              <button
-                                type="button"
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => void handleClearWeiboBinding(session.username)}
-                              >
-                                清除
-                              </button>
-                            )}
-                          </div>
-                          <div className="insight-social-binding-feedback">
-                            {weiboBindingError ? (
-                              <span className="binding-feedback error">{weiboBindingError}</span>
-                            ) : weiboBinding?.screenName ? (
-                              <span className="binding-feedback">@{weiboBinding.screenName}</span>
-                            ) : weiboBinding?.uid ? (
-                              <span className="binding-feedback">已绑定 UID：{weiboBinding.uid}</span>
-                            ) : (
-                              <span className="binding-feedback muted">仅支持手动填写数字 UID</span>
-                            )}
-                          </div>
+                          {session.type === 'private' ? (
+                            <>
+                              <div className="insight-social-binding-input-wrap">
+                                <span className="binding-platform-chip">微博</span>
+                                <input
+                                  type="text"
+                                  className="insight-social-binding-input"
+                                  value={weiboDraftValue}
+                                  placeholder="填写数字 UID"
+                                  onChange={(e) => updateWeiboBindingDraft(session.username, e.target.value)}
+                                />
+                              </div>
+                              <div className="insight-social-binding-actions">
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => void handleSaveWeiboBinding(session.username, session.displayName || session.username)}
+                                  disabled={isBindingLoading || !weiboDraftValue.trim()}
+                                >
+                                  {isBindingLoading ? '绑定中...' : (weiboBinding ? '更新' : '绑定')}
+                                </button>
+                                {weiboBinding && (
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => void handleClearWeiboBinding(session.username)}
+                                  >
+                                    清除
+                                  </button>
+                                )}
+                              </div>
+                              <div className="insight-social-binding-feedback">
+                                {weiboBindingError ? (
+                                  <span className="binding-feedback error">{weiboBindingError}</span>
+                                ) : weiboBinding?.screenName ? (
+                                  <span className="binding-feedback">@{weiboBinding.screenName}</span>
+                                ) : weiboBinding?.uid ? (
+                                  <span className="binding-feedback">已绑定 UID：{weiboBinding.uid}</span>
+                                ) : (
+                                  <span className="binding-feedback muted">仅支持手动填写数字 UID</span>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <div className="insight-social-binding-feedback">
+                              <span className="binding-feedback muted">仅私聊支持微博绑定</span>
+                            </div>
+                          )}
                         </div>
                         <div className="anti-revoke-row-status">
                           <span className={`status-badge ${isSelected ? 'installed' : 'not-installed'}`}>
                             <i className="status-dot" aria-hidden="true" />
-                            {isSelected ? '已加入' : '未加入'}
+                            {isSelected
+                              ? (aiInsightFilterMode === 'whitelist' ? '已允许' : '已屏蔽')
+                              : (aiInsightFilterMode === 'whitelist' ? '未允许' : '允许')}
                           </span>
                         </div>
                       </div>
@@ -3631,7 +3702,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         <div className="api-docs">
           <div className="api-item">
             <p className="api-desc" style={{ lineHeight: 1.7 }}>
-              <strong>触发方式一：活跃会话分析</strong> — 每当微信数据库变化（即你收到新消息）时，经过 500ms 防抖后，对最近活跃的私聊会话进行分析。<br />
+              <strong>触发方式一：活跃会话分析</strong> — 每当微信数据库变化（即你收到新消息）时，经过 500ms 防抖后，对符合黑白名单规则的活跃会话进行分析。<br />
               <strong>触发方式二：沉默扫描</strong> — 每 4 小时独立扫描一次，对超过阈值天数无消息的联系人发出提醒。<br />
               <strong>时间观念</strong> — 每次调用时，AI 会收到今天已向该联系人和全局发出过多少次见解，由 AI 自行决定是否需要克制。<br />
               <strong>隐私</strong> — 所有分析请求均直接从你的电脑发往你填写的 API 地址，不经过任何 WeFlow 服务器。
@@ -4049,16 +4120,16 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
       <div className="form-group">
         <label>推送内容</label>
-        <span className="form-hint">SSE 事件名为 `message.new`；私聊推送 `avatarUrl/sourceName/content`，群聊额外附带 `groupName`</span>
+        <span className="form-hint">SSE 事件名包含 `message.new` 和 `message.revoke`；私聊推送 `rawid/avatarUrl/sourceName/content/timestamp`，群聊额外附带 `groupName`，其中 `timestamp` 为秒级 Unix 时间戳</span>
         <div className="api-docs">
           <div className="api-item">
             <div className="api-endpoint">
               <span className="method get">GET</span>
               <code>{`http://${httpApiHost}:${httpApiPort}/api/v1/push/messages`}</code>
             </div>
-            <p className="api-desc">通过 SSE 长连接接收消息事件，建议接收端按 `messageKey` 去重。</p>
+            <p className="api-desc">通过 SSE 长连接接收消息事件，建议接收端按 `event + rawid` 去重。</p>
             <div className="api-params">
-              {['event', 'sessionId', 'sessionType', 'messageKey', 'avatarUrl', 'sourceName', 'groupName?', 'content'].map((param) => (
+              {['event', 'sessionId', 'sessionType', 'rawid', 'avatarUrl', 'sourceName', 'groupName?', 'content', 'timestamp'].map((param) => (
                 <span key={param} className="param">
                   <code>{param}</code>
                 </span>
