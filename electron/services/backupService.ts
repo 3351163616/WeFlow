@@ -7,7 +7,6 @@ import * as tar from 'tar'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { expandHomePath } from '../utils/pathUtils'
-import { decryptDatViaNative, encryptDatViaNative, type NativeDatMeta } from './nativeImageDecrypt'
 
 type BackupDbKind = 'session' | 'contact' | 'emoticon' | 'message' | 'media' | 'sns' | 'hardlink'
 type BackupPhase = 'preparing' | 'scanning' | 'exporting' | 'packing' | 'inspecting' | 'restoring' | 'done' | 'failed'
@@ -48,7 +47,6 @@ interface BackupResourceEntry {
   targetRelativePath: string
   ext?: string
   size?: number
-  datMeta?: NativeDatMeta
 }
 
 interface BackupManifest {
@@ -288,27 +286,6 @@ export class BackupService {
     }
     const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
     return suffixMatch ? suffixMatch[1] : trimmed
-  }
-
-  private parseImageXorKey(value: unknown): number {
-    if (typeof value === 'number') return value
-    const text = String(value ?? '').trim()
-    if (!text) return Number.NaN
-    return text.toLowerCase().startsWith('0x') ? parseInt(text, 16) : parseInt(text, 10)
-  }
-
-  private getImageKeysForWxid(wxid: string): { xorKey: number; aesKey?: string } | null {
-    const wxidConfigs = this.configService.get('wxidConfigs') || {}
-    const candidates = this.buildWxidCandidates(wxid)
-    const matchedKey = Object.keys(wxidConfigs).find((key) => {
-      const cleanKey = this.cleanAccountDirName(key).toLowerCase()
-      return candidates.some(candidate => cleanKey === candidate.toLowerCase())
-    })
-    const cfg = matchedKey ? wxidConfigs[matchedKey] : undefined
-    const xorKey = this.parseImageXorKey(cfg?.imageXorKey ?? this.configService.get('imageXorKey'))
-    if (!Number.isFinite(xorKey)) return null
-    const aesKey = String(cfg?.imageAesKey ?? this.configService.get('imageAesKey') ?? '').trim()
-    return { xorKey, aesKey: aesKey || undefined }
   }
 
   private async listFilesForArchive(root: string, rel = '', state = { visited: 0 }): Promise<string[]> {
@@ -626,11 +603,9 @@ export class BackupService {
     manifest: BackupManifest
   ): Promise<void> {
     const accountDir = dirname(connected.dbStorage)
-    const keys = this.getImageKeysForWxid(connected.wxid)
     const imagesDir = join(stagingDir, 'resources', 'images')
     const imagePaths = await this.listChatImageDatFiles(accountDir)
     if (imagePaths.length === 0) return
-    if (!keys) throw new Error('存在图片资源，但未配置图片解密密钥')
 
     mkdirSync(imagesDir, { recursive: true })
     const resources: BackupResourceEntry[] = []
@@ -641,18 +616,16 @@ export class BackupService {
       if (!relativeTarget) continue
       emitImageProgress({
         phase: 'exporting',
-        message: '正在解密图片资源',
+        message: '正在打包图片资源',
         current: index + 1,
         total: imagePaths.length,
         detail: relativeTarget
       })
-      const decrypted = decryptDatViaNative(sourcePath, keys.xorKey, keys.aesKey)
-      if (!decrypted) continue
-      const archivePath = toArchivePath(join('resources', 'images', `${relativeTarget}${decrypted.ext || '.bin'}`))
+      const archivePath = toArchivePath(join('resources', 'images', relativeTarget))
       const outputPath = join(stagingDir, archivePath)
-      mkdirSync(dirname(outputPath), { recursive: true })
-      await writeFile(outputPath, decrypted.data)
+      await this.stagePlainResource(sourcePath, outputPath)
       const stem = basename(sourcePath).replace(/\.dat$/i, '').toLowerCase()
+      const stat = statSync(sourcePath)
       resources.push({
         kind: 'image',
         id: relativeTarget,
@@ -660,9 +633,7 @@ export class BackupService {
         sourceFileName: basename(sourcePath),
         archivePath,
         targetRelativePath: relativeTarget,
-        ext: decrypted.ext || undefined,
-        size: decrypted.data.length,
-        datMeta: decrypted.meta
+        size: stat.size
       })
       if (index % 20 === 0) await delay()
     }
@@ -930,13 +901,6 @@ export class BackupService {
     }
 
     const accountDir = dirname(connected.dbStorage)
-    const imageKeys = imageByPath.size > 0
-      ? this.getImageKeysForWxid(connected.wxid || String(manifest.source?.wxid || '').trim())
-      : null
-    if (imageByPath.size > 0 && !imageKeys) {
-      throw new Error('备份包包含图片资源，但目标账号未配置图片加密密钥')
-    }
-
     let current = startCurrent
     let skipped = 0
     const pending: Promise<void>[] = []
@@ -957,35 +921,26 @@ export class BackupService {
 
         const image = imageByPath.get(entryPath)
         if (image) {
-          const tempPath = this.resolveStagingPath(extractDir, entryPath)
           const targetPath = this.resolveTargetResourcePath(accountDir, image.targetRelativePath)
-          if (!tempPath || !targetPath) {
+          if (!targetPath) {
             skipped += 1
             entry.resume()
             return
           }
-          const task = this.writeTarEntryToFile(entry, tempPath).then(async () => {
-            current += 1
-            emitRestoreProgress({
-              phase: 'restoring',
-              message: '正在加密并写回图片资源',
-              current,
-              total,
-              detail: image.md5 || image.targetRelativePath
-            })
-            if (existsSync(targetPath)) {
-              skipped += 1
-              return
-            }
-            const encrypted = encryptDatViaNative(tempPath, imageKeys!.xorKey, imageKeys!.aesKey, image.datMeta)
-            if (!encrypted) {
-              skipped += 1
-              return
-            }
-            mkdirSync(dirname(targetPath), { recursive: true })
-            await writeFile(targetPath, encrypted)
+          current += 1
+          emitRestoreProgress({
+            phase: 'restoring',
+            message: '正在写回图片资源',
+            current,
+            total,
+            detail: image.md5 || image.targetRelativePath
           })
-          pending.push(task)
+          if (existsSync(targetPath)) {
+            skipped += 1
+            entry.resume()
+            return
+          }
+          pending.push(this.writeTarEntryToFile(entry, targetPath))
           return
         }
 
