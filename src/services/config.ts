@@ -119,7 +119,8 @@ export const CONFIG_KEYS = {
   // AI 足迹
   AI_FOOTPRINT_ENABLED: 'aiFootprintEnabled',
   AI_FOOTPRINT_SYSTEM_PROMPT: 'aiFootprintSystemPrompt',
-  AI_INSIGHT_DEBUG_LOG_ENABLED: 'aiInsightDebugLogEnabled'
+  AI_INSIGHT_DEBUG_LOG_ENABLED: 'aiInsightDebugLogEnabled',
+  AUTO_DOWNLOAD_HIGH_RES: 'autoDownloadHighRes'
 } as const
 
 export interface WxidConfig {
@@ -2145,5 +2146,14 @@ export async function getAiInsightDebugLogEnabled(): Promise<boolean> {
 
 export async function setAiInsightDebugLogEnabled(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_DEBUG_LOG_ENABLED, enabled)
+}
+
+export async function getAutoDownloadHighRes(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES)
+  return value === true
+}
+
+export async function setAutoDownloadHighRes(enabled: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES, enabled)
 }
 

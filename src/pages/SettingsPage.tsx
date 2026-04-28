@@ -32,6 +32,7 @@ type SettingsTab =
   | 'aiCommon'
   | 'insight'
   | 'aiFootprint'
+  | 'autoDownload'
 
 const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint'>; label: string; icon: React.ElementType }[] = [
   { id: 'appearance', label: '外观', icon: Palette },
@@ -39,6 +40,7 @@ const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint'>; label: string
   { id: 'antiRevoke', label: '防撤回', icon: RotateCcw },
   { id: 'database', label: '数据库连接', icon: Database },
   { id: 'models', label: '模型管理', icon: Mic },
+  { id: 'autoDownload', label: '自动下载', icon: Download },
   { id: 'cache', label: '缓存', icon: HardDrive },
   { id: 'api', label: 'API 服务', icon: Globe },
   { id: 'analytics', label: '分析', icon: BarChart2 },
@@ -46,6 +48,13 @@ const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint'>; label: string
   { id: 'updates', label: '版本更新', icon: RefreshCw },
   { id: 'about', label: '关于', icon: Info }
 ]
+
+const filteredTabs = tabs.filter(tab => {
+  if (tab.id === 'autoDownload') {
+    return (window as any).electronAPI.process.platform === 'win32' && (window as any).electronAPI.process.arch === 'x64'
+  }
+  return true
+})
 
 const aiTabs: Array<{ id: Extract<SettingsTab, 'aiCommon' | 'insight' | 'aiFootprint'>; label: string }> = [
   { id: 'aiCommon', label: '基础配置' },
@@ -149,6 +158,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [imageKeyPercent, setImageKeyPercent] = useState<number | null>(null)
 
   const [logEnabled, setLogEnabled] = useState(false)
+  const [autoDownloadHighRes, setAutoDownloadHighRes] = useState(false)
   const [whisperModelName, setWhisperModelName] = useState('base')
   const [whisperModelDir, setWhisperModelDir] = useState('')
   const [isWhisperDownloading, setIsWhisperDownloading] = useState(false)
@@ -529,8 +539,10 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setWordCloudExcludeWords(savedExcludeWords)
       setExcludeWordsInput(savedExcludeWords.join('\n'))
 
+      const savedAutoDownloadHighRes = await configService.getAutoDownloadHighRes()
       const savedAnalyticsConsent = await configService.getAnalyticsConsent()
       setAnalyticsConsent(savedAnalyticsConsent ?? false)
+      setAutoDownloadHighRes(savedAutoDownloadHighRes)
 
 
 
@@ -4658,6 +4670,44 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     </div>
   )
 
+  const renderAutoDownloadTab = () => (
+    <div className="tab-content">
+      <div className="form-group">
+        <label>自动下载大图</label>
+        <span className="form-hint">
+          开启后，WeFlow 会通过远程 Hook 技术强制微信在接收图片时下载高清原图（而非默认的缩略图）。
+          <br />
+          <strong>风险提示</strong>：Hook 涉及修改微信进程内存，虽不注入 DLL 但仍有被检测风险，请谨慎开启。
+        </span>
+        <div className="log-toggle-line">
+          <span className="log-status">{autoDownloadHighRes ? '已开启' : '已关闭'}</span>
+          <label className="switch" htmlFor="auto-download-high-res-toggle">
+            <input
+              id="auto-download-high-res-toggle"
+              className="switch-input"
+              type="checkbox"
+              checked={autoDownloadHighRes}
+              onChange={handleToggleAutoDownload}
+            />
+            <span className="switch-slider" />
+          </label>
+        </div>
+      </div>
+    </div>
+  )
+
+  const handleToggleAutoDownload = async () => {
+    const newVal = !autoDownloadHighRes
+    setAutoDownloadHighRes(newVal)
+    await configService.setAutoDownloadHighRes(newVal)
+    if (newVal) {
+      await (window as any).electronAPI.image.startAutoDownload()
+    } else {
+      await (window as any).electronAPI.image.stopAutoDownload()
+    }
+    showMessage(newVal ? '自动下载已开启' : '自动下载已关闭', true)
+  }
+
   const renderUpdatesTab = () => {
     const downloadPercent = Math.max(0, Math.min(100, Number(downloadProgress?.percent || 0)))
     const channelCards: { id: configService.UpdateChannel; title: string; desc: string }[] = [
@@ -4792,7 +4842,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
 
         <div className="settings-layout">
           <div className="settings-tabs" role="tablist" aria-label="设置项">
-            {tabs.flatMap((tab) => {
+            {filteredTabs.flatMap((tab) => {
               const row: React.ReactNode[] = [
                 <button
                   key={tab.id}
@@ -4850,6 +4900,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
             {activeTab === 'aiCommon' && renderAiCommonTab()}
             {activeTab === 'insight' && renderInsightTab()}
             {activeTab === 'aiFootprint' && renderAiFootprintTab()}
+            {activeTab === 'autoDownload' && renderAutoDownloadTab()}
             {activeTab === 'updates' && renderUpdatesTab()}
             {activeTab === 'analytics' && renderAnalyticsTab()}
             {activeTab === 'security' && renderSecurityTab()}
