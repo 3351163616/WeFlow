@@ -86,7 +86,13 @@ interface ConfigSchema {
   aiInsightApiModel: string
   aiInsightSilenceDays: number
   aiInsightAllowContext: boolean
+  aiInsightAllowMomentsContext: boolean
+  aiInsightMomentsContextCount: number
+  aiInsightMomentsBindings: Record<string, { enabled: boolean; updatedAt: number }>
   aiInsightAllowSocialContext: boolean
+  aiInsightSocialContextCount: number
+  aiInsightWeiboCookie: string
+  aiInsightWeiboBindings: Record<string, { uid: string; screenName?: string; updatedAt: number }>
   aiInsightFilterMode: 'whitelist' | 'blacklist'
   aiInsightFilterList: string[]
   aiInsightWhitelistEnabled: boolean
@@ -268,6 +274,9 @@ export class ConfigService {
       aiInsightApiModel: 'gpt-4o-mini',
       aiInsightSilenceDays: 3,
       aiInsightAllowContext: false,
+      aiInsightAllowMomentsContext: false,
+      aiInsightMomentsContextCount: 5,
+      aiInsightMomentsBindings: {},
       aiInsightAllowSocialContext: false,
       aiInsightFilterMode: 'whitelist',
       aiInsightFilterList: [],

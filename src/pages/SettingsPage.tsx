@@ -284,6 +284,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [aiModelApiMaxTokens, setAiModelApiMaxTokens] = useState(200)
   const [aiInsightSilenceDays, setAiInsightSilenceDays] = useState(3)
   const [aiInsightAllowContext, setAiInsightAllowContext] = useState(false)
+  const [aiInsightAllowMomentsContext, setAiInsightAllowMomentsContext] = useState(false)
+  const [aiInsightMomentsContextCount, setAiInsightMomentsContextCount] = useState(5)
+  const [aiInsightMomentsBindings, setAiInsightMomentsBindings] = useState<Record<string, configService.AiInsightMomentsBinding>>({})
   const [isTestingInsight, setIsTestingInsight] = useState(false)
   const [insightTestResult, setInsightTestResult] = useState<{ success: boolean; message: string } | null>(null)
   const [showInsightApiKey, setShowInsightApiKey] = useState(false)
@@ -549,6 +552,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const savedAiModelApiMaxTokens = await configService.getAiModelApiMaxTokens()
       const savedAiInsightSilenceDays = await configService.getAiInsightSilenceDays()
       const savedAiInsightAllowContext = await configService.getAiInsightAllowContext()
+      const savedAiInsightAllowMomentsContext = await configService.getAiInsightAllowMomentsContext()
+      const savedAiInsightMomentsContextCount = await configService.getAiInsightMomentsContextCount()
+      const savedAiInsightMomentsBindings = await configService.getAiInsightMomentsBindings()
       const savedAiInsightFilterMode = await configService.getAiInsightFilterMode()
       const savedAiInsightFilterList = await configService.getAiInsightFilterList()
       const savedAiInsightCooldownMinutes = await configService.getAiInsightCooldownMinutes()
@@ -573,6 +579,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setAiModelApiMaxTokens(savedAiModelApiMaxTokens)
       setAiInsightSilenceDays(savedAiInsightSilenceDays)
       setAiInsightAllowContext(savedAiInsightAllowContext)
+      setAiInsightAllowMomentsContext(savedAiInsightAllowMomentsContext)
+      setAiInsightMomentsContextCount(savedAiInsightMomentsContextCount)
+      setAiInsightMomentsBindings(savedAiInsightMomentsBindings)
       setAiInsightFilterMode(savedAiInsightFilterMode)
       setAiInsightFilterList(new Set(savedAiInsightFilterList))
       setAiInsightCooldownMinutes(savedAiInsightCooldownMinutes)
@@ -3081,6 +3090,24 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     })
   }
 
+  const isMomentsEnabledForSession = (sessionId: string): boolean => {
+    return aiInsightMomentsBindings[sessionId]?.enabled === true
+  }
+
+  const handleToggleMomentsBinding = async (sessionId: string, enabled: boolean) => {
+    const nextBindings = { ...aiInsightMomentsBindings }
+    if (enabled) {
+      nextBindings[sessionId] = {
+        enabled: true,
+        updatedAt: Date.now()
+      }
+    } else {
+      delete nextBindings[sessionId]
+    }
+    setAiInsightMomentsBindings(nextBindings)
+    await configService.setAiInsightMomentsBindings(nextBindings)
+  }
+
   const handleSaveWeiboBinding = async (sessionId: string, displayName: string) => {
     const draftUid = getWeiboBindingDraftValue(sessionId)
     setWeiboBindingLoadingSessionId(sessionId)
@@ -3274,7 +3301,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         <span className="form-hint">
           开启后，触发见解时会将该联系人最近 N 条聊天记录发送给 AI，分析质量显著提升。
           <br />
-          <strong>关闭时</strong>：AI 仅知道统计摘要（沉默天数等），输出质量较低。
+          <strong>关闭时</strong>：不会发送聊天原文，输出质量较低。
           <br />
           <strong>开启时</strong>：聊天文本内容（不含图片、语音）会通过你配置的 API 发送给模型提供商。请确认你信任该服务商。
         </span>
@@ -3295,27 +3322,79 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         </div>
       </div>
 
-      {aiInsightAllowContext && (
-        <div className="form-group">
-          <label>发送近期对话条数</label>
-          <span className="form-hint">
-            发送给 AI 的聊天记录最大条数。条数越多分析越准确，token 消耗也越多。
-          </span>
-          <input
-            type="number"
-            className="field-input"
-            value={aiInsightContextCount}
-            min={1}
-            max={200}
-            onChange={(e) => {
-              const val = Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 40))
-              setAiInsightContextCount(val)
-              scheduleConfigSave('aiInsightContextCount', () => configService.setAiInsightContextCount(val))
-            }}
-            style={{ width: 100 }}
-          />
+      <div className={`insight-collapsible-setting ${aiInsightAllowContext ? 'expanded' : 'collapsed'}`} aria-hidden={!aiInsightAllowContext}>
+        <div className="insight-collapsible-setting-inner">
+          <div className="form-group">
+            <label>发送近期对话条数</label>
+            <span className="form-hint">
+              发送给 AI 的聊天记录最大条数。条数越多分析越准确，token 消耗也越多。
+            </span>
+            <input
+              type="number"
+              className="field-input"
+              value={aiInsightContextCount}
+              min={1}
+              max={200}
+              disabled={!aiInsightAllowContext}
+              onChange={(e) => {
+                const val = Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 40))
+                setAiInsightContextCount(val)
+                scheduleConfigSave('aiInsightContextCount', () => configService.setAiInsightContextCount(val))
+              }}
+              style={{ width: 100 }}
+            />
+          </div>
         </div>
-      )}
+      </div>
+
+      <div className="divider" />
+
+      <div className="form-group">
+        <label>允许发送近期朋友圈内容用于分析（实验性）</label>
+        <span className="form-hint">
+          开启后，可在下方列表为私聊联系人单独允许朋友圈补充分析。程序只会在触发见解时按需读取，不会做后台持续扫描。
+        </span>
+        <div className="log-toggle-line">
+          <span className="log-status">{aiInsightAllowMomentsContext ? '已开启' : '已关闭'}</span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={aiInsightAllowMomentsContext}
+              onChange={async (e) => {
+                const val = e.target.checked
+                setAiInsightAllowMomentsContext(val)
+                await configService.setAiInsightAllowMomentsContext(val)
+              }}
+            />
+            <span className="switch-slider" />
+          </label>
+        </div>
+      </div>
+
+      <div className={`insight-collapsible-setting ${aiInsightAllowMomentsContext ? 'expanded' : 'collapsed'}`} aria-hidden={!aiInsightAllowMomentsContext}>
+        <div className="insight-collapsible-setting-inner">
+          <div className="form-group">
+            <label>发送近期朋友圈条数</label>
+            <span className="form-hint">
+              发送给 AI 的朋友圈最大条数。条数越多上下文越充分，token 消耗也越多。
+            </span>
+            <input
+              type="number"
+              className="field-input"
+              value={aiInsightMomentsContextCount}
+              min={1}
+              max={20}
+              disabled={!aiInsightAllowMomentsContext}
+              onChange={(e) => {
+                const val = Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 5))
+                setAiInsightMomentsContextCount(val)
+                scheduleConfigSave('aiInsightMomentsContextCount', () => configService.setAiInsightMomentsContextCount(val))
+              }}
+              style={{ width: 100 }}
+            />
+          </div>
+        </div>
+      </div>
 
       <div className="divider" />
 
@@ -3354,29 +3433,32 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         )}
       </div>
 
-      {aiInsightAllowSocialContext && (
-        <div className="form-group">
-          <label>发送近期社交平台内容条数</label>
-          <span className="form-hint">
-            当前仅支持微博最近发帖。
-            <br />
-            <strong>不建议超过 5，避免触发平台风控。</strong>
-          </span>
-          <input
-            type="number"
-            className="field-input"
-            value={aiInsightSocialContextCount}
-            min={1}
-            max={5}
-            onChange={(e) => {
-              const val = Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 3))
-              setAiInsightSocialContextCount(val)
-              scheduleConfigSave('aiInsightSocialContextCount', () => configService.setAiInsightSocialContextCount(val))
-            }}
-            style={{ width: 100 }}
-          />
+      <div className={`insight-collapsible-setting ${aiInsightAllowSocialContext ? 'expanded' : 'collapsed'}`} aria-hidden={!aiInsightAllowSocialContext}>
+        <div className="insight-collapsible-setting-inner">
+          <div className="form-group">
+            <label>发送近期社交平台内容条数</label>
+            <span className="form-hint">
+              当前仅支持微博最近发帖。
+              <br />
+              <strong>不建议超过 5，避免触发平台风控。</strong>
+            </span>
+            <input
+              type="number"
+              className="field-input"
+              value={aiInsightSocialContextCount}
+              min={1}
+              max={5}
+              disabled={!aiInsightAllowSocialContext}
+              onChange={(e) => {
+                const val = Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 3))
+                setAiInsightSocialContextCount(val)
+                scheduleConfigSave('aiInsightSocialContextCount', () => configService.setAiInsightSocialContextCount(val))
+              }}
+              style={{ width: 100 }}
+            />
+          </div>
         </div>
-      )}
+      </div>
 
       <div className="divider" />
       {/* 自定义 System Prompt */}
@@ -3652,11 +3734,14 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                 <>
                   <div className="anti-revoke-list-header">
                     <span>对话（{filteredSessions.length}）</span>
+                    <span className="insight-moments-column-title">朋友圈</span>
                     <span className="insight-social-column-title">社交平台（微博）</span>
-                    <span>状态</span>
+                    <span className="anti-revoke-status-column-title">状态</span>
                   </div>
                   {filteredSessions.map((session) => {
                     const isSelected = aiInsightFilterList.has(session.username)
+                    const isPrivateSession = session.type === 'private'
+                    const isMomentsEnabled = isMomentsEnabledForSession(session.username)
                     const weiboBinding = aiInsightWeiboBindings[session.username]
                     const weiboDraftValue = getWeiboBindingDraftValue(session.username)
                     const isBindingLoading = weiboBindingLoadingSessionId === session.username
@@ -3695,8 +3780,24 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                             <span className="desc">{getSessionFilterTypeLabel(session.type)}</span>
                           </div>
                         </label>
+                        <div className="insight-moments-cell">
+                          {isPrivateSession ? (
+                            <label className="insight-moments-toggle">
+                              <input
+                                type="checkbox"
+                                checked={isMomentsEnabled}
+                                onChange={(e) => { void handleToggleMomentsBinding(session.username, e.target.checked) }}
+                              />
+                              <span className="check-indicator" aria-hidden="true">
+                                <Check size={12} />
+                              </span>
+                            </label>
+                          ) : (
+                            <span className="binding-feedback muted">-</span>
+                          )}
+                        </div>
                         <div className="insight-social-binding-cell">
-                          {session.type === 'private' ? (
+                          {isPrivateSession ? (
                             <>
                               <div className="insight-social-binding-input-wrap">
                                 <span className="binding-platform-chip">微博</span>
@@ -3771,9 +3872,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         <div className="api-docs">
           <div className="api-item">
             <p className="api-desc" style={{ lineHeight: 1.7 }}>
-              <strong>触发方式一：活跃会话分析</strong> — 每当微信数据库变化（即你收到新消息）时，经过 500ms 防抖后，对符合黑白名单规则的活跃会话进行分析。<br />
+              <strong>触发方式一：活跃会话分析</strong> — 每当微信数据库变化（即你收到新消息）时，经过约 2 秒防抖后，对符合黑白名单规则的活跃会话进行分析。<br />
               <strong>触发方式二：沉默扫描</strong> — 每 4 小时独立扫描一次，对超过阈值天数无消息的联系人发出提醒。<br />
-              <strong>时间观念</strong> — 每次调用时，AI 会收到今天已向该联系人和全局发出过多少次见解，由 AI 自行决定是否需要克制。<br />
+              <strong>频率控制</strong> — 冷却期、沉默间隔、黑白名单均在本地判断，不额外发送给模型。<br />
               <strong>隐私</strong> — 所有分析请求均直接从你的电脑发往你填写的 API 地址，不经过任何 WeFlow 服务器。
             </p>
           </div>

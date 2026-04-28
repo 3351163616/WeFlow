@@ -915,6 +915,31 @@
   color: var(--text-secondary);
 }
 
+.insight-collapsible-setting {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transform: translate3d(0, -4px, 0);
+  contain: layout paint;
+  will-change: max-height, opacity, transform;
+  transition: max-height 0.2s ease, opacity 0.18s ease, transform 0.2s ease;
+
+  &.expanded {
+    max-height: 128px;
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+
+  &.collapsed {
+    pointer-events: none;
+  }
+}
+
+.insight-collapsible-setting-inner {
+  padding-top: 2px;
+  backface-visibility: hidden;
+}
+
 /* Premium Switch Style */
 .switch {
   position: relative;
@@ -3616,23 +3641,102 @@
   }
 
   &.insight-social-tab {
+    --insight-moments-column-width: 76px;
+    --insight-social-column-width: minmax(220px, 300px);
+    --insight-status-column-width: 82px;
+    --insight-social-list-grid: minmax(0, 1fr) var(--insight-moments-column-width) var(--insight-social-column-width) var(--insight-status-column-width);
+
     .anti-revoke-list-header {
-      grid-template-columns: minmax(0, 1fr) minmax(300px, 420px) auto;
+      grid-template-columns: var(--insight-social-list-grid);
+      gap: 14px;
+
+      .insight-moments-column-title {
+        display: flex;
+        justify-content: center;
+        color: var(--text-tertiary);
+      }
 
       .insight-social-column-title {
+        min-width: 0;
+        color: var(--text-tertiary);
+      }
+
+      .anti-revoke-status-column-title {
+        justify-self: end;
         color: var(--text-tertiary);
       }
     }
 
     .anti-revoke-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(300px, 420px) auto;
+      grid-template-columns: var(--insight-social-list-grid);
       align-items: center;
       gap: 14px;
     }
 
     .anti-revoke-row-main {
       min-width: 0;
+    }
+
+    .insight-moments-cell {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+    }
+
+    .insight-moments-toggle {
+      position: relative;
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+
+      input[type='checkbox'] {
+        position: absolute;
+        inset: 0;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      .check-indicator {
+        width: 100%;
+        height: 100%;
+        border-radius: 6px;
+        border: 1px solid color-mix(in srgb, var(--border-color) 78%, var(--primary) 22%);
+        background: color-mix(in srgb, var(--bg-primary) 86%, var(--bg-secondary) 14%);
+        color: var(--on-primary, #fff);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.16s ease;
+
+        svg {
+          opacity: 0;
+          transform: scale(0.75);
+          transition: opacity 0.16s ease, transform 0.16s ease;
+        }
+      }
+
+      input[type='checkbox']:checked + .check-indicator {
+        background: var(--primary);
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+
+        svg {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      input[type='checkbox']:focus-visible + .check-indicator {
+        outline: 2px solid color-mix(in srgb, var(--primary) 42%, transparent);
+        outline-offset: 1px;
+      }
     }
 
     .insight-social-binding-cell {
@@ -3653,7 +3757,7 @@
     .binding-platform-chip {
       flex-shrink: 0;
       border-radius: 999px;
-      padding: 2px 8px;
+      padding: 2px 7px;
       font-size: 11px;
       color: var(--text-secondary);
       border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
@@ -3663,7 +3767,7 @@
     .insight-social-binding-input {
       width: 100%;
       min-width: 0;
-      height: 30px;
+      height: 28px;
       border-radius: 8px;
       border: 1px solid var(--border-color);
       background: color-mix(in srgb, var(--bg-primary) 92%, var(--bg-secondary) 8%);
@@ -3706,9 +3810,10 @@
     }
 
     .anti-revoke-row-status {
-      justify-self: flex-end;
+      justify-self: end;
       align-items: flex-end;
       max-width: none;
+      min-width: 0;
     }
   }
 
@@ -3752,6 +3857,7 @@
       .anti-revoke-list-header {
         grid-template-columns: minmax(0, 1fr) auto;
 
+        .insight-moments-column-title,
         .insight-social-column-title {
           display: none;
         }
@@ -3763,9 +3869,14 @@
         flex-direction: column;
       }
 
+      .insight-moments-cell,
       .insight-social-binding-cell,
       .anti-revoke-row-status {
         width: 100%;
+      }
+
+      .insight-moments-cell {
+        justify-content: flex-start;
       }
 
       .insight-social-binding-cell {
