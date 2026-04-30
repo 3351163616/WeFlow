@@ -1,6 +1,5 @@
 import { join, dirname } from 'path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs'
-import { app } from 'electron'
 import { ConfigService } from './config'
 
 export interface ContactCacheEntry {

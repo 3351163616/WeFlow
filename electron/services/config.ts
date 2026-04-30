@@ -1,13 +1,14 @@
-﻿import { join } from 'path'
-import { app, safeStorage } from 'electron'
+﻿import { dirname, join } from 'path'
 import crypto from 'crypto'
-import Store from 'electron-store'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { expandHomePath } from '../utils/pathUtils'
+import { getElectronSafeStorage, getPathFallback, isWorkerRuntime } from './electronRuntime'
 
 // 加密前缀标记
 const SAFE_PREFIX = 'safe:'  // safeStorage 加密（普通模式）
 const isSafeStorageAvailable = (): boolean => {
   try {
+    const safeStorage = getElectronSafeStorage()
     return typeof safeStorage?.isEncryptionAvailable === 'function' && safeStorage.isEncryptionAvailable()
   } catch {
     return false
@@ -36,6 +37,7 @@ interface ConfigSchema {
   language: string
   logEnabled: boolean
   launchAtStartup?: boolean
+  silentStartup?: boolean
   llmModelPath: string
   whisperModelName: string
   whisperModelDir: string
@@ -114,6 +116,68 @@ interface ConfigSchema {
   characterPromptExportDir: string
 }
 
+interface ConfigStoreLike<T extends Record<string, any>> {
+  get<K extends keyof T>(key: K): T[K]
+  set<K extends keyof T>(key: K, value: T[K]): void
+  clear(): void
+  store: T
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value))
+}
+
+class JsonConfigStore<T extends Record<string, any>> implements ConfigStoreLike<T> {
+  private readonly filePath: string
+  private readonly defaults: T
+  private data: T
+
+  constructor(options: { name: string; defaults: T; cwd?: string }) {
+    const baseDir = options.cwd || getPathFallback('userData')
+    mkdirSync(baseDir, { recursive: true })
+    this.filePath = join(baseDir, `${options.name}.json`)
+    this.defaults = cloneJson(options.defaults)
+    this.data = cloneJson(options.defaults)
+    this.load()
+  }
+
+  get store(): T {
+    return this.data
+  }
+
+  private load(): void {
+    try {
+      if (!existsSync(this.filePath)) return
+      const raw = readFileSync(this.filePath, 'utf8')
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') {
+        this.data = { ...cloneJson(this.defaults), ...parsed }
+      }
+    } catch {
+      this.data = cloneJson(this.defaults)
+    }
+  }
+
+  private persist(): void {
+    mkdirSync(dirname(this.filePath), { recursive: true })
+    writeFileSync(this.filePath, JSON.stringify(this.data), 'utf8')
+  }
+
+  get<K extends keyof T>(key: K): T[K] {
+    return this.data[key]
+  }
+
+  set<K extends keyof T>(key: K, value: T[K]): void {
+    this.data[key] = value
+    this.persist()
+  }
+
+  clear(): void {
+    this.data = cloneJson(this.defaults)
+    this.persist()
+  }
+}
+
 // 需要 safeStorage 加密的字段（普通模式）
 const ENCRYPTED_STRING_KEYS: Set<string> = new Set([
   'decryptKey',
@@ -133,7 +197,7 @@ const LOCKABLE_NUMBER_KEYS: Set<string> = new Set(['imageXorKey'])
 
 export class ConfigService {
   private static instance: ConfigService
-  private store!: Store<ConfigSchema>
+  private store!: ConfigStoreLike<ConfigSchema>
 
   // 锁定模式运行时状态
   private unlockedKeys: Map<string, any> = new Map()
@@ -166,6 +230,7 @@ export class ConfigService {
       themeId: 'cloud-dancer',
       language: 'zh-CN',
       logEnabled: false,
+      silentStartup: false,
       llmModelPath: '',
       whisperModelName: 'base',
       whisperModelDir: '',
@@ -227,36 +292,17 @@ export class ConfigService {
       characterPromptExportDir: ''
     }
 
-    const storeOptions: any = {
+    const cwd = String(process.env.WEFLOW_CONFIG_CWD || process.env.WEFLOW_USER_DATA_PATH || '').trim()
+    this.store = new JsonConfigStore<ConfigSchema>({
       name: 'WeFlow-config',
       defaults,
-      projectName: String(process.env.WEFLOW_PROJECT_NAME || 'WeFlow').trim() || 'WeFlow'
-    }
-    const runningInWorker = process.env.WEFLOW_WORKER === '1'
-    if (runningInWorker) {
-      const cwd = String(process.env.WEFLOW_CONFIG_CWD || process.env.WEFLOW_USER_DATA_PATH || '').trim()
-      if (cwd) {
-        storeOptions.cwd = cwd
-      }
-    }
+      cwd: cwd || undefined
+    })
 
-    try {
-      this.store = new Store<ConfigSchema>(storeOptions)
-    } catch (error) {
-      const message = String((error as Error)?.message || error || '')
-      if (message.includes('projectName')) {
-        const fallbackOptions = {
-          ...storeOptions,
-          projectName: 'WeFlow',
-          cwd: storeOptions.cwd || process.env.WEFLOW_CONFIG_CWD || process.env.WEFLOW_USER_DATA_PATH || process.cwd()
-        }
-        this.store = new Store<ConfigSchema>(fallbackOptions)
-      } else {
-        throw error
-      }
+    if (!isWorkerRuntime()) {
+      this.migrateAuthFields()
+      this.migrateAiConfig()
     }
-    this.migrateAuthFields()
-    this.migrateAiConfig()
   }
 
   // === 状态查询 ===
@@ -358,6 +404,8 @@ export class ConfigService {
     if (!plaintext) return ''
     if (plaintext.startsWith(SAFE_PREFIX)) return plaintext
     if (!isSafeStorageAvailable()) return plaintext
+    const safeStorage = getElectronSafeStorage()
+    if (!safeStorage) return plaintext
     const encrypted = safeStorage.encryptString(plaintext)
     return SAFE_PREFIX + encrypted.toString('base64')
   }
@@ -366,6 +414,8 @@ export class ConfigService {
     if (!stored) return ''
     if (!stored.startsWith(SAFE_PREFIX)) return stored
     if (!isSafeStorageAvailable()) return ''
+    const safeStorage = getElectronSafeStorage()
+    if (!safeStorage) return ''
     try {
       const buf = Buffer.from(stored.slice(SAFE_PREFIX.length), 'base64')
       return safeStorage.decryptString(buf)
@@ -833,7 +883,7 @@ export class ConfigService {
     if (workerUserDataPath) {
       return workerUserDataPath
     }
-    return app?.getPath?.('userData') || process.cwd()
+    return getPathFallback('userData')
   }
 
   getCacheBasePath(): string {

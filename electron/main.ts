@@ -16,13 +16,13 @@ import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
 import { exportService, ExportOptions, ExportProgress } from './services/exportService'
+import { exportTaskControlService } from './services/exportTaskControlService'
 import { KeyService } from './services/keyService'
 import { KeyServiceLinux } from './services/keyServiceLinux'
 import { KeyServiceMac } from './services/keyServiceMac'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
 import { snsService, isVideoUrl } from './services/snsService'
-import { contactExportService } from './services/contactExportService'
 import { windowsHelloService } from './services/windowsHelloService'
 import { exportCardDiagnosticsService } from './services/exportCardDiagnosticsService'
 import { cloudControlService } from './services/cloudControlService'
@@ -39,6 +39,7 @@ import { annualReportAiService } from './services/annualReportAiService'
 import { analyticsAiService } from './services/analyticsAiService'
 import { testAiConnection } from './services/aiStreamService'
 import { characterPromptRedeemService } from './services/characterPromptRedeemService'
+import { backupService } from './services/backupService'
 
 // 配置自动更新
 autoUpdater.autoDownload = false
@@ -69,6 +70,42 @@ const defaultUpdateTrack: 'stable' | 'preview' | 'dev' = (() => {
   return 'stable'
 })()
 let configService: ConfigService | null = null
+const activeExportWorkers = new Map<string, Worker>()
+const activeExportTasks = new Set<string>()
+
+const normalizeExportTaskId = (taskId: unknown): string => String(taskId || '').trim()
+
+const postExportWorkerControl = (taskId: string, action: 'pause' | 'resume' | 'cancel') => {
+  const worker = activeExportWorkers.get(taskId)
+  if (!worker) return
+  try {
+    worker.postMessage({ type: `export:${action}` })
+  } catch (error) {
+    console.warn(`[export-task-control] failed to post ${action} to worker:`, error)
+  }
+}
+
+const finalizeExportTaskControlResult = async (taskId: string, result: any) => {
+  if (!taskId) return result
+  if (result?.stopped) {
+    const cleanup = await exportTaskControlService.cleanupTask(taskId)
+    if (!cleanup.success) {
+      return {
+        ...result,
+        success: false,
+        error: `导出已停止，但清理已导出文件失败：${cleanup.error || '未知错误'}`
+      }
+    }
+    return {
+      ...result,
+      cleanup
+    }
+  }
+  if (!result?.paused) {
+    exportTaskControlService.releaseTask(taskId)
+  }
+  return result
+}
 
 const normalizeUpdateTrack = (raw: unknown): 'stable' | 'preview' | 'dev' | null => {
   if (raw === 'stable' || raw === 'preview' || raw === 'dev') return raw
@@ -751,6 +788,10 @@ const ensureWeChatRequestHeaderInterceptor = (): void => {
 const getWindowCloseBehavior = (): WindowCloseBehavior => {
   const behavior = configService?.get('windowCloseBehavior')
   return behavior === 'tray' || behavior === 'quit' ? behavior : 'ask'
+}
+
+const isSilentStartupEnabled = (): boolean => {
+  return configService?.get('silentStartup') === true
 }
 
 const requestMainWindowCloseConfirmation = (win: BrowserWindow): void => {
@@ -2315,6 +2356,18 @@ function registerIpcHandlers() {
     return true
   })
 
+  ipcMain.handle('backup:create', async (_, payload: { outputPath: string; options?: { includeImages?: boolean; includeVideos?: boolean; includeFiles?: boolean } }) => {
+    return backupService.createBackup(payload.outputPath, payload.options)
+  })
+
+  ipcMain.handle('backup:inspect', async (_, payload: { archivePath: string }) => {
+    return backupService.inspectBackup(payload.archivePath)
+  })
+
+  ipcMain.handle('backup:restore', async (_, payload: { archivePath: string }) => {
+    return backupService.restoreBackup(payload.archivePath)
+  })
+
 
 
   // 聊天相关
@@ -2359,6 +2412,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle('chat:getNewMessages', async (_, sessionId: string, minTime: number, limit?: number) => {
     return chatService.getNewMessages(sessionId, minTime, limit)
+  })
+
+  ipcMain.handle('chat:getAntiRevokeSessions', async () => {
+    return chatService.getAntiRevokeSessions()
   })
 
   ipcMain.handle('chat:updateMessage', async (_, sessionId: string, localId: number, createTime: number, newContent: string) => {
@@ -2752,16 +2809,25 @@ function registerIpcHandlers() {
 
   ipcMain.handle('sns:exportTimeline', async (event, options: any) => {
     const exportOptions = { ...(options || {}) }
+    const taskId = normalizeExportTaskId(exportOptions.taskId)
     delete exportOptions.taskId
+    const taskControl = taskId ? exportTaskControlService.createControl(taskId, String(exportOptions.outputDir || '')) : undefined
+    if (taskId) activeExportTasks.add(taskId)
 
-    return snsService.exportTimeline(
-      exportOptions,
-      (progress) => {
-        if (!event.sender.isDestroyed()) {
-          event.sender.send('sns:exportProgress', progress)
-        }
-      }
-    )
+    try {
+      const result = await snsService.exportTimeline(
+        exportOptions,
+        (progress) => {
+          if (!event.sender.isDestroyed()) {
+            event.sender.send('sns:exportProgress', progress)
+          }
+        },
+        taskControl
+      )
+      return finalizeExportTaskControlResult(taskId, result)
+    } finally {
+      if (taskId) activeExportTasks.delete(taskId)
+    }
   })
 
   ipcMain.handle('sns:selectExportDir', async () => {
@@ -3084,7 +3150,40 @@ function registerIpcHandlers() {
     return exportService.getExportStats(sessionIds, options)
   })
 
-  ipcMain.handle('export:exportSessions', async (event, sessionIds: string[], outputDir: string, options: ExportOptions) => {
+  ipcMain.handle('export:pauseTask', async (_, taskId: string) => {
+    const normalizedTaskId = normalizeExportTaskId(taskId)
+    if (!normalizedTaskId) return { success: false, error: '缺少导出任务 ID' }
+    const success = exportTaskControlService.pauseTask(normalizedTaskId)
+    if (success) postExportWorkerControl(normalizedTaskId, 'pause')
+    return { success }
+  })
+
+  ipcMain.handle('export:resumeTask', async (_, taskId: string) => {
+    const normalizedTaskId = normalizeExportTaskId(taskId)
+    if (!normalizedTaskId) return { success: false, error: '缺少导出任务 ID' }
+    const success = exportTaskControlService.resumeTask(normalizedTaskId)
+    if (success) postExportWorkerControl(normalizedTaskId, 'resume')
+    return { success }
+  })
+
+  ipcMain.handle('export:cancelTask', async (_, taskId: string) => {
+    const normalizedTaskId = normalizeExportTaskId(taskId)
+    if (!normalizedTaskId) return { success: false, error: '缺少导出任务 ID' }
+    const success = exportTaskControlService.cancelTask(normalizedTaskId)
+    if (success) postExportWorkerControl(normalizedTaskId, 'cancel')
+    if (success && !activeExportTasks.has(normalizedTaskId)) {
+      const cleanup = await exportTaskControlService.cleanupTask(normalizedTaskId)
+      return cleanup.success
+        ? { success: true, cleanup }
+        : { success: false, error: cleanup.error || '清理已导出文件失败' }
+    }
+    return { success }
+  })
+
+  ipcMain.handle('export:exportSessions', async (event, sessionIds: string[], outputDir: string, options: ExportOptions, controlOptions?: { taskId?: string }) => {
+    const taskId = normalizeExportTaskId(controlOptions?.taskId)
+    if (taskId) exportTaskControlService.createControl(taskId, outputDir)
+    if (taskId) activeExportTasks.add(taskId)
     const PROGRESS_FORWARD_INTERVAL_MS = 180
     let pendingProgress: ExportProgress | null = null
     let progressTimer: NodeJS.Timeout | null = null
@@ -3128,17 +3227,13 @@ function registerIpcHandlers() {
       queueProgress(progress)
     }
 
-    const runMainFallback = async (reason: string) => {
-      console.warn(`[fallback-export-main] ${reason}`)
-      return exportService.exportSessions(sessionIds, outputDir, options, onProgress)
-    }
-
     const cfg = configService || new ConfigService()
     configService = cfg
     const logEnabled = cfg.get('logEnabled')
     const dbPath = String(cfg.get('dbPath') || '').trim()
     const decryptKey = String(cfg.get('decryptKey') || '').trim()
     const myWxid = String(cfg.get('myWxid') || '').trim()
+    const imageKeys = cfg.getImageKeysForCurrentWxid()
     const resourcesPath = app.isPackaged
       ? join(process.resourcesPath, 'resources')
       : join(app.getAppPath(), 'resources')
@@ -3152,9 +3247,12 @@ function registerIpcHandlers() {
             sessionIds,
             outputDir,
             options,
+            taskId,
             dbPath,
             decryptKey,
             myWxid,
+            imageXorKey: imageKeys.xorKey,
+            imageAesKey: imageKeys.aesKey,
             resourcesPath,
             userDataPath,
             logEnabled
@@ -3162,9 +3260,15 @@ function registerIpcHandlers() {
         })
 
         let settled = false
+        if (taskId) {
+          activeExportWorkers.set(taskId, worker)
+        }
         const finalizeResolve = (value: any) => {
           if (settled) return
           settled = true
+          if (taskId && activeExportWorkers.get(taskId) === worker) {
+            activeExportWorkers.delete(taskId)
+          }
           worker.removeAllListeners()
           void worker.terminate()
           resolve(value)
@@ -3172,6 +3276,9 @@ function registerIpcHandlers() {
         const finalizeReject = (error: Error) => {
           if (settled) return
           settled = true
+          if (taskId && activeExportWorkers.get(taskId) === worker) {
+            activeExportWorkers.delete(taskId)
+          }
           worker.removeAllListeners()
           void worker.terminate()
           reject(error)
@@ -3180,6 +3287,28 @@ function registerIpcHandlers() {
         worker.on('message', (msg: any) => {
           if (msg && msg.type === 'export:progress') {
             onProgress(msg.data as ExportProgress)
+            return
+          }
+          if (msg && msg.type === 'export:createdFiles' && taskId) {
+            const filePaths = Array.isArray(msg.filePaths) ? msg.filePaths : []
+            for (const filePath of filePaths) {
+              exportTaskControlService.recordCreatedFile(taskId, String(filePath || ''))
+            }
+            return
+          }
+          if (msg && msg.type === 'export:createdDirs' && taskId) {
+            const dirPaths = Array.isArray(msg.dirPaths) ? msg.dirPaths : []
+            for (const dirPath of dirPaths) {
+              exportTaskControlService.recordCreatedDir(taskId, String(dirPath || ''))
+            }
+            return
+          }
+          if (msg && msg.type === 'export:createdFile' && taskId) {
+            exportTaskControlService.recordCreatedFile(taskId, String(msg.filePath || ''))
+            return
+          }
+          if (msg && msg.type === 'export:createdDir' && taskId) {
+            exportTaskControlService.recordCreatedDir(taskId, String(msg.dirPath || ''))
             return
           }
           if (msg && msg.type === 'export:result') {
@@ -3207,10 +3336,27 @@ function registerIpcHandlers() {
     }
 
     try {
-      return await runWorker()
+      const result = await runWorker()
+      return await finalizeExportTaskControlResult(taskId, result)
     } catch (error) {
-      return runMainFallback(error instanceof Error ? error.message : String(error))
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[export-worker] ${errorMessage}`)
+      const normalizedSessionIds = Array.isArray(sessionIds) ? sessionIds : []
+      const failedSessionErrors: Record<string, string> = {}
+      for (const sessionId of normalizedSessionIds) {
+        failedSessionErrors[sessionId] = errorMessage
+      }
+      const result = {
+        success: false,
+        successCount: 0,
+        failCount: normalizedSessionIds.length,
+        failedSessionIds: normalizedSessionIds,
+        failedSessionErrors,
+        error: `导出 Worker 执行失败: ${errorMessage}`
+      }
+      return await finalizeExportTaskControlResult(taskId, result)
     } finally {
+      if (taskId) activeExportTasks.delete(taskId)
       flushProgress()
       if (progressTimer) {
         clearTimeout(progressTimer)
@@ -3219,12 +3365,136 @@ function registerIpcHandlers() {
     }
   })
 
-  ipcMain.handle('export:exportSession', async (_, sessionId: string, outputPath: string, options: ExportOptions) => {
-    return exportService.exportSessionToChatLab(sessionId, outputPath, options)
+  ipcMain.handle('export:exportSession', async (event, sessionId: string, outputPath: string, options: ExportOptions) => {
+    const cfg = configService || new ConfigService()
+    configService = cfg
+    const imageKeys = cfg.getImageKeysForCurrentWxid()
+    const workerPath = join(__dirname, 'exportWorker.js')
+
+    try {
+      return await new Promise<any>((resolve) => {
+        const worker = new Worker(workerPath, {
+          workerData: {
+            mode: 'single',
+            sessionId,
+            outputPath,
+            options,
+            dbPath: String(cfg.get('dbPath') || '').trim(),
+            decryptKey: String(cfg.get('decryptKey') || '').trim(),
+            myWxid: String(cfg.get('myWxid') || '').trim(),
+            imageXorKey: imageKeys.xorKey,
+            imageAesKey: imageKeys.aesKey,
+            resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
+            userDataPath: app.getPath('userData'),
+            logEnabled: cfg.get('logEnabled')
+          }
+        })
+
+        let settled = false
+        const finalize = (value: any) => {
+          if (settled) return
+          settled = true
+          worker.removeAllListeners()
+          void worker.terminate()
+          resolve(value)
+        }
+        const fail = (error: unknown) => {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          console.error(`[export-worker-single] ${errorMessage}`)
+          finalize({ success: false, error: `导出 Worker 执行失败: ${errorMessage}` })
+        }
+
+        worker.on('message', (msg: any) => {
+          if (msg && msg.type === 'export:progress') {
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('export:progress', msg.data)
+            }
+            return
+          }
+          if (msg && msg.type === 'export:result') {
+            finalize(msg.data)
+            return
+          }
+          if (msg && msg.type === 'export:error') {
+            fail(String(msg.error || '导出 Worker 执行失败'))
+          }
+        })
+        worker.on('error', fail)
+        worker.on('exit', (code) => {
+          if (settled) return
+          if (code === 0) {
+            finalize({ success: false, error: '导出 Worker 未返回结果' })
+          } else {
+            fail(`导出 Worker 异常退出: ${code}`)
+          }
+        })
+      })
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[export-worker-single] ${errorMessage}`)
+      return { success: false, error: `导出 Worker 启动失败: ${errorMessage}` }
+    }
   })
 
   ipcMain.handle('export:exportContacts', async (_, outputDir: string, options: any) => {
-    return contactExportService.exportContacts(outputDir, options)
+    const cfg = configService || new ConfigService()
+    configService = cfg
+    const workerPath = join(__dirname, 'exportWorker.js')
+
+    try {
+      return await new Promise<any>((resolve) => {
+        const worker = new Worker(workerPath, {
+          workerData: {
+            mode: 'contacts',
+            outputDir,
+            options,
+            dbPath: String(cfg.get('dbPath') || '').trim(),
+            decryptKey: String(cfg.get('decryptKey') || '').trim(),
+            myWxid: String(cfg.get('myWxid') || '').trim(),
+            resourcesPath: app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources'),
+            userDataPath: app.getPath('userData'),
+            logEnabled: cfg.get('logEnabled')
+          }
+        })
+
+        let settled = false
+        const finalize = (value: any) => {
+          if (settled) return
+          settled = true
+          worker.removeAllListeners()
+          void worker.terminate()
+          resolve(value)
+        }
+        const fail = (error: unknown) => {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          console.error(`[export-worker-contacts] ${errorMessage}`)
+          finalize({ success: false, error: `导出 Worker 执行失败: ${errorMessage}` })
+        }
+
+        worker.on('message', (msg: any) => {
+          if (msg && msg.type === 'export:result') {
+            finalize(msg.data)
+            return
+          }
+          if (msg && msg.type === 'export:error') {
+            fail(String(msg.error || '导出 Worker 执行失败'))
+          }
+        })
+        worker.on('error', fail)
+        worker.on('exit', (code) => {
+          if (settled) return
+          if (code === 0) {
+            finalize({ success: false, error: '导出 Worker 未返回结果' })
+          } else {
+            fail(`导出 Worker 异常退出: ${code}`)
+          }
+        })
+      })
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[export-worker-contacts] ${errorMessage}`)
+      return { success: false, error: `导出 Worker 启动失败: ${errorMessage}` }
+    }
   })
 
   // 数据分析相关
@@ -3864,21 +4134,31 @@ function checkForUpdatesOnStartup() {
 }
 
 app.whenReady().then(async () => {
-  // 立即创建 Splash 窗口，确保用户尽快看到反馈
-  createSplashWindow()
+  // 先初始化配置，以便在启动早期判定是否需要静默启动
+  configService = new ConfigService()
+  applyAutoUpdateChannel('startup')
+  syncLaunchAtStartupPreference()
+  const onboardingDone = configService.get('onboardingDone') === true
+  const startInBackground = onboardingDone && isSilentStartupEnabled()
+  shouldShowMain = onboardingDone
 
-  // 等待 Splash 页面加载完成后再推送进度
-  if (splashWindow) {
-    await new Promise<void>((resolve) => {
-      if (splashWindow!.webContents.isLoading()) {
-        splashWindow!.webContents.once('did-finish-load', () => resolve())
-      } else {
-        resolve()
-      }
-    })
-    splashWindow.webContents
-      .executeJavaScript(`setVersion(${JSON.stringify(app.getVersion())})`)
-      .catch(() => {})
+  if (!startInBackground) {
+    // 非静默模式下显示 Splash，提供启动反馈
+    createSplashWindow()
+
+    // 等待 Splash 页面加载完成后再推送进度
+    if (splashWindow) {
+      await new Promise<void>((resolve) => {
+        if (splashWindow!.webContents.isLoading()) {
+          splashWindow!.webContents.once('did-finish-load', () => resolve())
+        } else {
+          resolve()
+        }
+      })
+      splashWindow.webContents
+        .executeJavaScript(`setVersion(${JSON.stringify(app.getVersion())})`)
+        .catch(() => {})
+    }
   }
 
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -3907,13 +4187,7 @@ app.whenReady().then(async () => {
     })
   }
 
-  // 初始化配置服务
   updateSplashProgress(5, '正在加载配置...')
-  configService = new ConfigService()
-  applyAutoUpdateChannel('startup')
-  syncLaunchAtStartupPreference()
-  const onboardingDone = configService.get('onboardingDone') === true
-  shouldShowMain = onboardingDone
 
   // 将用户主题配置推送给 Splash 窗口
   if (splashWindow && !splashWindow.isDestroyed()) {
@@ -4085,6 +4359,8 @@ app.whenReady().then(async () => {
 
   if (!onboardingDone) {
     createOnboardingWindow()
+  } else if (startInBackground && tray) {
+    mainWindow?.hide()
   } else {
     mainWindow?.show()
   }
@@ -4137,5 +4413,4 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
-
 
