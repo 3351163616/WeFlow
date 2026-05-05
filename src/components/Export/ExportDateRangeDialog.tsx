@@ -565,6 +565,7 @@ export function ExportDateRangeDialog({
           </button>
         </div>
 
+        <div className="export-date-range-dialog-content">
         <div className="export-date-range-preset-list">
           {EXPORT_DATE_RANGE_PRESETS.map((preset) => {
             const active = isPresetActive(preset.value)
@@ -728,6 +729,7 @@ export function ExportDateRangeDialog({
             })}
           </div>
         </section>
+        </div>
 
         <div className="export-date-range-dialog-actions">
           <button type="button" className="export-date-range-dialog-btn secondary" onClick={onClose}>

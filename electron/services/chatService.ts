@@ -6,6 +6,7 @@ import * as https from 'https'
 import * as http from 'http'
 import * as fzstd from 'fzstd'
 import * as crypto from 'crypto'
+import { app, BrowserWindow, dialog } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { MessageCacheService } from './messageCacheService'
@@ -17,7 +18,6 @@ import { voiceTranscribeService } from './voiceTranscribeService'
 import { ImageDecryptService } from './imageDecryptService'
 import { CONTACT_REGION_LOOKUP_DATA } from './contactRegionLookupData'
 import { LRUCache } from '../utils/LRUCache.js'
-import { getAppPathFallback, getElectronBrowserWindow, getElectronDialog, getPathFallback, isElectronAppPackaged } from './electronRuntime'
 
 export interface ChatSession {
   username: string
@@ -498,7 +498,7 @@ class ChatService {
   }
 
   private async maybeShowInitFailureDialog(errorMessage: string): Promise<void> {
-    if (!isElectronAppPackaged()) return
+    if (!app.isPackaged) return
     if (this.initFailureDialogShown) return
 
     const code = this.extractErrorCode(errorMessage)
@@ -519,8 +519,6 @@ class ChatService {
     ].join('\n')
 
     try {
-      const dialog = getElectronDialog()
-      if (!dialog?.showMessageBox) return
       await dialog.showMessageBox({
         type: 'error',
         title: 'WeFlow 启动失败',
@@ -602,7 +600,7 @@ class ChatService {
           console.error('[ChatService] 数据库监听回调失败:', error)
         }
       }
-      const windows = getElectronBrowserWindow()?.getAllWindows?.() || []
+      const windows = BrowserWindow.getAllWindows()
       // 广播给所有渲染进程窗口
       windows.forEach((win) => {
         if (!win.isDestroyed()) {
@@ -7182,7 +7180,7 @@ class ChatService {
       return join(cachePath, 'Voices')
     }
     // 回退到默认目录
-    const documentsPath = getPathFallback('documents')
+    const documentsPath = app.getPath('documents')
     return join(documentsPath, 'WeFlow', 'Voices')
   }
 
@@ -7192,7 +7190,7 @@ class ChatService {
       return join(cachePath, 'Emojis')
     }
     // 回退到默认目录
-    const documentsPath = getPathFallback('documents')
+    const documentsPath = app.getPath('documents')
     return join(documentsPath, 'WeFlow', 'Emojis')
   }
 
@@ -8437,13 +8435,13 @@ class ChatService {
   private async decodeSilkToPcm(silkData: Buffer, sampleRate: number): Promise<Buffer | null> {
     try {
       let wasmPath: string
-      if (isElectronAppPackaged()) {
+      if (app.isPackaged) {
         wasmPath = join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
         if (!existsSync(wasmPath)) {
           wasmPath = join(process.resourcesPath, 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
         }
       } else {
-        wasmPath = join(getAppPathFallback(), 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
+        wasmPath = join(app.getAppPath(), 'node_modules', 'silk-wasm', 'lib', 'silk.wasm')
       }
 
       if (!existsSync(wasmPath)) {
@@ -8631,7 +8629,7 @@ class ChatService {
   /** 获取持久化转写缓存文件路径 */
   private getTranscriptCachePath(): string {
     const cachePath = this.configService.get('cachePath')
-    const base = cachePath || join(getPathFallback('documents'), 'WeFlow')
+    const base = cachePath || join(app.getPath('documents'), 'WeFlow')
     return join(base, 'Voices', 'transcripts.json')
   }
 

@@ -2015,6 +2015,7 @@
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
     width: 480px;
     max-width: 92vw;
+    max-height: calc(100vh - 80px);
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border-color);
@@ -2062,6 +2063,9 @@
         display: flex;
         flex-direction: column;
         gap: 18px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
     }
 }
 

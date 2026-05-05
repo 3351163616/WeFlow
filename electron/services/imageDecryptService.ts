@@ -1,3 +1,4 @@
+﻿import { app, BrowserWindow } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { pathToFileURL } from 'url'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, appendFileSync } from 'fs'
@@ -7,7 +8,6 @@ import crypto from 'crypto'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
 import { decryptDatViaNative, nativeAddonLocation } from './nativeImageDecrypt'
-import { getElectronBrowserWindow, getPathFallback, isElectronAppPackaged } from './electronRuntime'
 
 // 获取 ffmpeg-static 的路径
 function getStaticFfmpegPath(): string | null {
@@ -35,7 +35,7 @@ function getStaticFfmpegPath(): string | null {
     }
 
     // 方法3: 打包后的路径
-    if (isElectronAppPackaged()) {
+    if (app?.isPackaged) {
       const resourcesPath = process.resourcesPath
       const packedPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
       if (existsSync(packedPath)) {
@@ -1475,7 +1475,7 @@ export class ImageDecryptService {
 
   private getActiveWindowsSafely(): Array<{ isDestroyed: () => boolean; webContents: { send: (channel: string, payload: unknown) => void } }> {
     try {
-      const getter = (getElectronBrowserWindow() as { getAllWindows?: () => any[] } | undefined)?.getAllWindows
+      const getter = (BrowserWindow as unknown as { getAllWindows?: () => any[] } | undefined)?.getAllWindows
       if (typeof getter !== 'function') return []
       const windows = getter()
       if (!Array.isArray(windows)) return []
@@ -2191,7 +2191,14 @@ export class ImageDecryptService {
   }
 
   private getElectronPath(name: 'userData' | 'documents' | 'temp'): string | null {
-    return getPathFallback(name)
+    try {
+      const getter = (app as unknown as { getPath?: (n: string) => string } | undefined)?.getPath
+      if (typeof getter !== 'function') return null
+      const value = getter(name)
+      return typeof value === 'string' && value.trim() ? value : null
+    } catch {
+      return null
+    }
   }
 
   private getUserDataPath(): string {

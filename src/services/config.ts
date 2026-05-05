@@ -97,6 +97,9 @@ export const CONFIG_KEYS = {
   AI_INSIGHT_API_MODEL: 'aiInsightApiModel',
   AI_INSIGHT_SILENCE_DAYS: 'aiInsightSilenceDays',
   AI_INSIGHT_ALLOW_CONTEXT: 'aiInsightAllowContext',
+  AI_INSIGHT_ALLOW_MOMENTS_CONTEXT: 'aiInsightAllowMomentsContext',
+  AI_INSIGHT_MOMENTS_CONTEXT_COUNT: 'aiInsightMomentsContextCount',
+  AI_INSIGHT_MOMENTS_BINDINGS: 'aiInsightMomentsBindings',
   AI_INSIGHT_ALLOW_SOCIAL_CONTEXT: 'aiInsightAllowSocialContext',
   AI_INSIGHT_FILTER_MODE: 'aiInsightFilterMode',
   AI_INSIGHT_FILTER_LIST: 'aiInsightFilterList',
@@ -116,7 +119,9 @@ export const CONFIG_KEYS = {
   // AI 足迹
   AI_FOOTPRINT_ENABLED: 'aiFootprintEnabled',
   AI_FOOTPRINT_SYSTEM_PROMPT: 'aiFootprintSystemPrompt',
-  AI_INSIGHT_DEBUG_LOG_ENABLED: 'aiInsightDebugLogEnabled'
+  AI_INSIGHT_DEBUG_LOG_ENABLED: 'aiInsightDebugLogEnabled',
+  AUTO_DOWNLOAD_HIGH_RES: 'autoDownloadHighRes',
+  AUTO_DOWNLOAD_WHITELIST: 'autoDownloadWhitelist'
 } as const
 
 export interface WxidConfig {
@@ -129,6 +134,11 @@ export interface WxidConfig {
 export interface AiInsightWeiboBinding {
   uid: string
   screenName?: string
+  updatedAt: number
+}
+
+export interface AiInsightMomentsBinding {
+  enabled: boolean
   updatedAt: number
 }
 
@@ -1922,6 +1932,24 @@ export async function setAiInsightAllowContext(allow: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_ALLOW_CONTEXT, allow)
 }
 
+export async function getAiInsightAllowMomentsContext(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_ALLOW_MOMENTS_CONTEXT)
+  return value === true
+}
+
+export async function setAiInsightAllowMomentsContext(allow: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_ALLOW_MOMENTS_CONTEXT, allow)
+}
+
+export async function getAiInsightMomentsContextCount(): Promise<number> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_MOMENTS_CONTEXT_COUNT)
+  return typeof value === 'number' && value > 0 ? value : 5
+}
+
+export async function setAiInsightMomentsContextCount(count: number): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_MOMENTS_CONTEXT_COUNT, count)
+}
+
 export async function getAiInsightAllowSocialContext(): Promise<boolean> {
   const value = await config.get(CONFIG_KEYS.AI_INSIGHT_ALLOW_SOCIAL_CONTEXT)
   return value === true
@@ -2067,6 +2095,33 @@ export async function setAiInsightWeiboBindings(bindings: Record<string, AiInsig
   await config.set(CONFIG_KEYS.AI_INSIGHT_WEIBO_BINDINGS, bindings)
 }
 
+const normalizeAiInsightMomentsBindings = (value: unknown): Record<string, AiInsightMomentsBinding> => {
+  if (!value || typeof value !== 'object') return {}
+  const result: Record<string, AiInsightMomentsBinding> = {}
+  for (const [sessionIdRaw, bindingRaw] of Object.entries(value as Record<string, unknown>)) {
+    const sessionId = String(sessionIdRaw || '').trim()
+    if (!sessionId) continue
+    if (!bindingRaw || typeof bindingRaw !== 'object') continue
+    const bindingObj = bindingRaw as { enabled?: unknown; updatedAt?: unknown }
+    if (bindingObj.enabled !== true) continue
+    const updatedAtRaw = Number(bindingObj.updatedAt)
+    result[sessionId] = {
+      enabled: true,
+      updatedAt: Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? Math.floor(updatedAtRaw) : Date.now()
+    }
+  }
+  return result
+}
+
+export async function getAiInsightMomentsBindings(): Promise<Record<string, AiInsightMomentsBinding>> {
+  const value = await config.get(CONFIG_KEYS.AI_INSIGHT_MOMENTS_BINDINGS)
+  return normalizeAiInsightMomentsBindings(value)
+}
+
+export async function setAiInsightMomentsBindings(bindings: Record<string, AiInsightMomentsBinding>): Promise<void> {
+  await config.set(CONFIG_KEYS.AI_INSIGHT_MOMENTS_BINDINGS, normalizeAiInsightMomentsBindings(bindings))
+}
+
 export async function getAiFootprintEnabled(): Promise<boolean> {
   const value = await config.get(CONFIG_KEYS.AI_FOOTPRINT_ENABLED)
   return value === true
@@ -2092,5 +2147,24 @@ export async function getAiInsightDebugLogEnabled(): Promise<boolean> {
 
 export async function setAiInsightDebugLogEnabled(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AI_INSIGHT_DEBUG_LOG_ENABLED, enabled)
+}
+
+export async function getAutoDownloadHighRes(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES)
+  return value === true
+}
+
+export async function setAutoDownloadHighRes(enabled: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES, enabled)
+}
+
+export async function getAutoDownloadWhitelist(): Promise<string[]> {
+  const value = await config.get(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST)
+  return Array.isArray(value) ? value : []
+}
+
+export async function setAutoDownloadWhitelist(list: string[]): Promise<void> {
+  const normalized = Array.from(new Set((list || []).map(item => String(item || '').trim()).filter(Boolean)))
+  await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST, normalized)
 }
 
